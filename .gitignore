@@ -144,6 +144,5 @@ cython_debug/
 
 # Ignore common file types for analysis
 *.csv
-*.txt
 *.xlsx
 .playwright-mcp/*
