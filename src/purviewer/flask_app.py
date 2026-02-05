@@ -1,21 +1,16 @@
-# Copyright (c) 2025 Danny Stewart
-# Licensed under the MIT License
-
 """Flask web interface for Purviewer audit log analyzer."""
 
 from __future__ import annotations
 
 import json
-import re
 import os
 import tempfile
 import secrets
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-from flask import Flask, jsonify, render_template, request, send_file, session
+from flask import Flask, render_template, request, session
 from polykit import PolyLog
 from werkzeug.utils import secure_filename
 
@@ -26,13 +21,7 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
 
-from purviewer.entra import EntraSignInOperations
-from purviewer.exchange import ExchangeOperations
-from purviewer.files import FileOperations
-from purviewer.main import parse_arguments
-from purviewer.network import NetworkOperations
-from purviewer.tools import AuditConfig, OutputFormatter
-from purviewer.users import UserActions
+from purviewer.tools import AuditConfig
 
 if TYPE_CHECKING:
     from pandas import DataFrame
@@ -51,7 +40,7 @@ app = Flask(
 )
 
 # Configure Flask app
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB max file size
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 app.config["UPLOAD_FOLDER"] = tempfile.gettempdir()
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", secrets.token_hex(32))
 app.config["SESSION_COOKIE_SECURE"] = False
@@ -91,12 +80,6 @@ class AnalysisSession:
         self.df = df
         self.user_map_df = user_map_df
         self.config = AuditConfig()
-        self.out = OutputFormatter(self.config, logger)
-        self.users = UserActions(self.config, self.out, logger)
-        self.network = NetworkOperations(self.config, self.out, logger)
-        self.files = FileOperations(self.config, self.out, logger, self.users)
-        self.exchange = ExchangeOperations(self.config, self.out, logger)
-        self.entra = EntraSignInOperations(self.config, self.out, logger)
 
         # Set up user mapping if provided
         if user_map_df is not None:
@@ -226,12 +209,8 @@ def analyze(session_id: str, analysis_type: str) -> tuple[dict[str, Any], int] |
             results = analyze_file_operations(session_obj, params)
         elif analysis_type == "user_activity":
             results = analyze_user_activity(session_obj, params)
-        elif analysis_type == "network_security":
-            results = analyze_network_security(session_obj, params)
         elif analysis_type == "exchange":
             results = analyze_exchange(session_obj, params)
-        elif analysis_type == "entra":
-            results = analyze_entra(session_obj, params)
         elif analysis_type == "summary":
             results = analyze_summary(session_obj)
         else:
@@ -242,7 +221,6 @@ def analyze(session_id: str, analysis_type: str) -> tuple[dict[str, Any], int] |
     except Exception as e:
         logger.error(f"Analysis error: {e}")
         return {"error": str(e)}, 500
-
 
 def detect_log_type(df: DataFrame) -> str:
     """Detect the type of log file based on columns."""
@@ -262,7 +240,6 @@ def detect_log_type(df: DataFrame) -> str:
         return "purview"
 
     return "unknown"
-
 
 def apply_filters(df: DataFrame, params: dict[str, Any]) -> DataFrame:
     """Apply user-defined filters to the DataFrame."""
@@ -303,7 +280,6 @@ def apply_filters(df: DataFrame, params: dict[str, Any]) -> DataFrame:
         df = filter_by_date(df, params["start_date"], params["end_date"])
     
     return df
-
 
 def filter_detailed_operations(detailed_ops: list[dict[str, Any]], params: dict[str, Any]) -> list[dict[str, Any]]:
     """Filter detailed operations based on user parameters."""
@@ -350,7 +326,6 @@ def filter_detailed_operations(detailed_ops: list[dict[str, Any]], params: dict[
             pass
     
     return filtered_ops
-
 
 def analyze_file_operations(session: AnalysisSession, params: dict[str, Any]) -> dict[str, Any]:
     """Analyze file operations with detailed breakdown."""
@@ -416,7 +391,6 @@ def analyze_file_operations(session: AnalysisSession, params: dict[str, Any]) ->
         "top_users_detail": top_users_detail,
     }
 
-
 def analyze_user_activity(session: AnalysisSession, params: dict[str, Any]) -> dict[str, Any]:
     """Analyze user activity with detailed statistics."""
     df = session.df
@@ -465,36 +439,6 @@ def analyze_user_activity(session: AnalysisSession, params: dict[str, Any]) -> d
         "user_stats": user_detailed_stats,
         "user_activity_timeline": user_activity_timeline,
     }
-
-
-def analyze_network_security(session: AnalysisSession, params: dict[str, Any]) -> dict[str, Any]:
-    """Analyze network and security."""
-    df = session.df
-    
-    # Apply filters
-    df = apply_filters(df, params)
-
-    # Get top IPs
-    top_ips = {}
-    if "ClientIP" in df.columns:
-        top_ips = df["ClientIP"].value_counts().head(20).to_dict()
-
-    # Get user agents
-    user_agents = {}
-    if "UserAgent" in df.columns:
-        user_agents = df["UserAgent"].value_counts().head(10).to_dict()
-
-    # Get devices
-    devices = {}
-    if "DeviceDisplayName" in df.columns:
-        devices = df["DeviceDisplayName"].value_counts().head(10).to_dict()
-
-    return {
-        "top_ips": top_ips,
-        "user_agents": user_agents,
-        "devices": devices,
-    }
-
 
 def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[str, Any]:
     """Analyze exchange activity with detailed breakdown."""
@@ -752,41 +696,6 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
 
     return exchange_stats
 
-
-def analyze_entra(session: AnalysisSession, params: dict[str, Any]) -> dict[str, Any]:
-    """Analyze Entra sign-in data."""
-    df = session.df
-    
-    # Apply filters
-    df = apply_filters(df, params)
-
-    # Get sign-in summary
-    total_signins = len(df)
-    failed_signins = 0
-    if "Status" in df.columns:
-        failed_signins = len(df[df["Status"] == "Failure"])
-
-    # Get applications
-    applications = {}
-    if "Application" in df.columns:
-        applications = df["Application"].value_counts().head(10).to_dict()
-
-    # Get locations
-    locations = {}
-    if "Location" in df.columns:
-        locations = df["Location"].value_counts().head(10).to_dict()
-
-    return {
-        "total_signins": int(total_signins),
-        "failed_signins": int(failed_signins),
-        "success_rate": round(((total_signins - failed_signins) / total_signins * 100), 2)
-        if total_signins > 0
-        else 0,
-        "applications": applications,
-        "locations": locations,
-    }
-
-
 def analyze_summary(session: AnalysisSession) -> dict[str, Any]:
     """Get overall summary."""
     df = session.df
@@ -807,7 +716,6 @@ def analyze_summary(session: AnalysisSession) -> dict[str, Any]:
 
     return summary
 
-
 def filter_by_date(df: DataFrame, start_date: str, end_date: str) -> DataFrame:
     """Filter dataframe by date range."""
     try:
@@ -820,12 +728,10 @@ def filter_by_date(df: DataFrame, start_date: str, end_date: str) -> DataFrame:
         logger.error(f"Date filtering error: {e}")
     return df
 
-
 @app.errorhandler(413)
 def request_entity_too_large(error: Any) -> tuple[dict[str, str], int]:
     """Handle file too large error."""
     return {"error": "File is too large (max 500MB)"}, 413
-
 
 @app.errorhandler(404)
 def not_found(error: Any) -> tuple[dict[str, str], int]:

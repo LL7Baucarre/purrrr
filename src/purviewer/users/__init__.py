@@ -1,5 +1,4 @@
-# Copyright (c) 2025 Danny Stewart
-# Licensed under the MIT License
+
 
 """User activity tracking and mapping.
 

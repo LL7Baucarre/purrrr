@@ -1,5 +1,4 @@
-# Copyright (c) 2025 Danny Stewart
-# Licensed under the MIT License
+
 
 """A powerful command-line tool for analyzing Microsoft Purview audit logs and Entra sign-ins. Extract insights from SharePoint, OneDrive, Exchange activity, and user authentication with comprehensive filtering, security analysis, and detailed reporting.
 

@@ -1,5 +1,4 @@
-# Copyright (c) 2025 Danny Stewart
-# Licensed under the MIT License
+
 
 """Sign-in analysis module for Microsoft Entra audit logs.
 
