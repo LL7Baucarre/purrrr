@@ -1,14 +1,48 @@
 # purrrr
 
-A powerful command-line tool and web application for analyzing Microsoft Purview audit logs and Entra sign-ins. Extract insights from SharePoint, OneDrive, Exchange activity, and user authentication with comprehensive filtering, security analysis, and detailed reporting.
+A modern **web-based** analyzer for Microsoft Purview audit logs and Entra sign-ins. Upload, filter, and investigate SharePoint, OneDrive, and Exchange activity with an intuitive interface—no CLI required.
 
-**Available in two modes:**
-- **CLI**: Command-line analysis with JSON and formatted text output
-- **Web UI**: Flask-based web interface with Redis session management (Docker-ready)
+> **Note**: purrrr is a detached fork of the original [purviewer](https://github.com/dannystewart/purviewer) project. This version focuses exclusively on the web UI experience with Docker deployment and real-time filtering capabilities.
 
-## Features
+## Quick Start (Docker)
 
-### File Operations Analysis
+```bash
+# Clone and start the web app
+git clone <repo-url>
+cd purrrr
+docker compose up --build
+
+# Access the interface at http://localhost:5000
+```
+
+Upload your CSV audit log, explore data with interactive filters, and export results—all in your browser.
+
+## Web UI Features
+
+### Interactive Filtering & Analysis
+
+- **Real-Time Filtering**: Filter by workload, user, operation, IP address (with wildcard support), and date range
+- **Pattern Detection**: Automatically identify repetitive audit patterns across users, IPs, and operations
+- **Multiple IP Support**: Filter by single or multiple IPs with wildcard patterns (e.g., `192.168.1.*`)
+- **CSV Import**: Upload audit logs and optional user mapping files
+- **Session Management**: Analyze multiple logs in separate sessions with persistent state
+
+### Data Insights
+
+- **File Operations**: Track SharePoint/OneDrive file access, downloads, uploads, deletions
+- **User Activity**: Map user emails to display names, analyze activity by user
+- **Exchange Activity**: Monitor email operations, mailbox access, client applications
+- **IP Analysis**: Track source IPs with optional geolocation lookup (manual trigger)
+- **User Agent Detection**: Identify suspicious or unusual client applications
+
+### Export & Reporting
+
+- **CSV Export**: Export filtered Exchange activity with all relevant fields
+- **JSON API**: Access filtered results programmatically
+- **Multi-File Analysis**: Combine results from multiple audit log uploads
+- **Batch Operations**: Detect suspicious bulk deletions or downloads
+
+## File Operations Analysis
 
 - **File Activity Tracking**: Analyze downloads, uploads, deletions, and other file operations
 - **Path Analysis**: Track access patterns across SharePoint sites and OneDrive folders
@@ -16,21 +50,21 @@ A powerful command-line tool and web application for analyzing Microsoft Purview
 - **File Timeline**: Generate chronological timelines of file access events
 - **URL Export**: Export full SharePoint/OneDrive URLs for accessed files
 
-### User Activity Insights
+## User Activity Insights
 
 - **User Mapping**: Map user emails to display names via CSV import
 - **Activity Filtering**: Filter analysis by specific users or user groups
 - **Top Users**: Identify most active users by operation type
 - **User Statistics**: Detailed breakdown of user activity patterns
 
-### Security Analysis
+## Security Analysis
 
 - **IP Address Analysis**: Track and analyze source IP addresses with optional geolocation lookup
 - **User Agent Detection**: Identify unusual or suspicious client applications
 - **Suspicious Pattern Detection**: Flag bulk operations, unusual access patterns, and after-hours activity
-- **Network Filtering**: Filter by specific IP addresses or exclude known good IPs
+- **Network Filtering**: Filter by specific IP addresses or exclude known good IPs with wildcard support
 
-### Exchange Activity
+## Exchange Activity
 
 - **Email Operations**: Track email sends, moves, deletions, and rule changes
 - **Mailbox Access**: Monitor folder access and email reading patterns
@@ -38,14 +72,14 @@ A powerful command-line tool and web application for analyzing Microsoft Purview
 - **Detailed Email Analysis**: Extract subjects, senders, recipients, and attachments
 - **CSV Export**: Export complete Exchange activity to CSV for further analysis
 
-### Advanced Filtering
+## Advanced Filtering
 
 - **Date Range**: Filter analysis to specific time periods
 - **Action Types**: Focus on specific operations (downloads, uploads, etc.)
 - **File Keywords**: Search for files containing specific keywords
-- **IP Filtering**: Include or exclude specific IP addresses with wildcard support
+- **IP Filtering**: Include or exclude specific IP addresses with wildcard support (e.g., `172.16.*`, `10.0.0.50`)
 
-### Sign-in Analysis (from Entra ID sign-in logs)
+## Sign-in Analysis (from Entra ID sign-in logs)
 
 - **Authentication Tracking**: Analyze user sign-ins from Microsoft Entra audit logs
 - **Failure Detection**: Identify failed sign-ins and authentication errors
@@ -53,237 +87,143 @@ A powerful command-line tool and web application for analyzing Microsoft Purview
 - **Location Monitoring**: Analyze sign-in locations and IP addresses
 - **Security Insights**: Detect unusual sign-in patterns and potential security issues
 
-## Arguments
+## Installation & Deployment
 
-### Purview Log Analysis for SharePoint and Exchange
-
-```text
---actions ACTIONS                     specific actions to analyze, comma-separated
---list-files KEYWORD                  list filenames containing keyword
---list-actions-for-files KEYWORD      list actions performed on files by keyword
---user USERNAME                       filter actions by specific user
---user-map USER_MAP_CSV               optional M365 user export CSV (UPN, display name)
---start-date START_DATE               start date for analysis (YYYY-MM-DD)
---end-date END_DATE                   end date for analysis (YYYY-MM-DD)
---sort-by {filename,username,date}    sort results by filename, username, or date (default: date)
---details                             show detailed file lists in operation summaries
---ips IPS                             filter by individual IPs (comma-separated, supports wildcards)
---exclude-ips IPS                     exclude specific IPs (comma-separated, supports wildcards)
---do-ip-lookups                       perform IP geolocation lookups (takes a few seconds per IP)
---timeline                            print a full timeline of file access events
---full-urls                           print full URLs of accessed files
---exchange                            output only Exchange activity in table format
---export-exchange-csv OUTPUT_FILE     export Exchange activity to specified CSV file
-```
-
-### Entra ID Log Analysis for Sign-In Activity
-
-```text
---entra                               analyze sign-in data from an Entra ID CSV audit log
---filter FILTER_TEXT                  filter sign-ins by specified text (case-insensitive)
---exclude EXCLUDE_TEXT                exclude sign-ins with specified text (case-insensitive)
---limit MAX_ROWS                      limit rows shown for each sign-in column
-```
-
-### Output Format
-
-```text
---text                                output formatted text instead of JSON (default is JSON)
-```
-
-**Note**: purrrr outputs results as **JSON by default** for easy integration with scripts and tools. Use `--text` to get the traditional colored, formatted output.
-
-## Usage
-
-### CLI Mode (Local or Docker)
-
-#### Full Comprehensive Analysis
-
-```bash
-# Analyze all file operations from a Purview audit log (outputs JSON)
-purrrr audit_log.csv
-
-# Get formatted text output instead
-purrrr audit_log.csv --text
-
-# Analyze Entra ID sign-in data (outputs JSON)
-purrrr signin_data.csv --entra
-```
-
-### Common Workflows
-
-#### Security Investigation
-
-```bash
-# Look for suspicious bulk downloads (JSON output)
-purrrr audit_log.csv --actions "FileDownloaded" --details
-
-# With formatted text output
-purrrr audit_log.csv --actions "FileDownloaded" --details --text
-
-# Analyze IP addresses with geolocation
-purrrr audit_log.csv --do-ip-lookups
-
-# Check specific user's activity
-purrrr audit_log.csv --user "john.doe@company.com" --timeline
-```
-
-#### File Discovery
-
-```bash
-# Find files containing sensitive keywords
-purrrr audit_log.csv --list-actions-for-files "confidential"
-
-# Export all accessed file URLs
-purrrr audit_log.csv --full-urls
-```
-
-#### Exchange Analysis
-
-```bash
-# Focus on email activity only (JSON output)
-purrrr audit_log.csv --exchange
-
-# Export Exchange data for further analysis
-purrrr audit_log.csv --export-exchange-csv email_activity.csv
-```
-
-#### Sign-in Analysis
-
-```bash
-# Filter sign-ins by specific criteria
-purrrr signin_data.csv --entra --filter "admin" --exclude "success"
-```
-
-#### JSON Processing
-
-```bash
-# Parse JSON output with jq
-purrrr audit_log.csv | jq '.total_operations'
-
-# Extract specific data from results
-purrrr audit_log.csv | jq '.operations_by_user'
-
-# Programmatic integration
-python_script.py $(purrrr audit_log.csv | jq '.summary')
-```
-
-## Installation
-
-### Option 1: Local Installation (CLI Only)
-
-```bash
-pip install purrrr
-```
-
-### Option 2: Docker (Recommended for Web UI)
+### Docker (Recommended - Web UI)
 
 #### Prerequisites
 
 - Docker and Docker Compose installed
-- For M365 audit log analysis, export CSV files from Microsoft Purview
+- Microsoft Purview audit log CSV exports
 
-#### Quick Start with Docker Compose
+#### Quick Start
 
 ```bash
-# Clone or download the project
 cd purrrr
+docker compose up --build
 
-# Build and start services (Flask web app + Redis)
-docker-compose up --build
-
-# Access the web interface at http://localhost:5000
+# Access at http://localhost:5000
 ```
 
-The docker-compose setup includes:
-- **Redis 7** (Alpine): Session and cache management (2GB max memory)
-- **purrrr Web App**: Flask application on port 5000 with health checks
+The Docker setup includes:
+- **Flask Web App** (Port 5000): Interactive audit log analysis interface
+- **Redis 7** (Alpine, Port 6379): Session and cache management
 
-#### Docker Environment Variables
+#### Environment Configuration
 
 Edit `docker-compose.yml` before deployment:
 
 ```yaml
 environment:
   - FLASK_ENV=production              # Set to 'development' for debug mode
-  - REDIS_URL=redis://redis:6379/0   # Redis connection (default)
+  - REDIS_URL=redis://redis:6379/0   # Redis connection
   - UPLOAD_FOLDER=/tmp/purrrr         # Temporary upload directory
   - MAX_FILE_SIZE=500                 # Max file size in MB
-  - SECRET_KEY=your-secret-key        # CHANGE THIS FOR PRODUCTION
+  - SECRET_KEY=your-secure-key        # CHANGE FOR PRODUCTION
 ```
 
-#### Running Web App Standalone (Without Docker)
+#### Standalone Web App (Without Docker)
 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run Flask app locally (requires Redis or uses filesystem fallback)
+# Run Flask app (requires Redis or uses filesystem fallback)
 python run_web.py --host 0.0.0.0 --port 5000 --debug
 ```
 
-#### Docker Build Customization
+#### Production Deployment
 
-Build the image manually:
+1. **Change SECRET_KEY**: Generate a random, secure key in `docker-compose.yml`
+2. **Configure Redis**: Use external Redis for scaling (set `REDIS_URL` env var)
+3. **Volume Mounting**: Persist uploads and logs:
+   ```bash
+   -v /secure/path/uploads:/tmp/purrrr
+   -v /secure/path/logs:/app/logs
+   ```
+4. **Reverse Proxy**: Use Nginx/Traefik in front for SSL/TLS termination
+5. **Health Checks**: Endpoints checked every 30s; adjust in `docker-compose.yml` as needed
+
+### CLI Mode (Legacy - Optional)
+
+For command-line usage or automation scripts:
 
 ```bash
-docker build -t purrrr:latest .
-docker run -p 5000:5000 \
-  -e REDIS_URL=redis://your-redis-host:6379/0 \
-  -e SECRET_KEY=your-secret-key \
-  -v /path/to/logs:/app/logs \
-  purrrr:latest
+# Local installation
+pip install purrrr
+
+# Analyze from CLI
+purrrr audit_log.csv --text
 ```
 
-#### Production Deployment Tips
-
-1. **Change SECRET_KEY**: Update `SECRET_KEY` in docker-compose.yml to a random string
-2. **Configure Redis**: Use external Redis for scaling (set `REDIS_URL` env var)
-3. **Volume Management**: Mount persistent volumes for logs and uploads:
-   ```bash
-   -v /secure/path/logs:/app/logs
-   -v /secure/path/uploads:/tmp/purrrr
-   ```
-4. **Health Checks**: Endpoints checked every 30s; configure `HEALTHCHECK` in docker-compose.yml
-5. **Reverse Proxy**: Use Nginx/Traefik in front of the Flask app for SSL/TLS
+**Note**: The web UI is the primary interface. CLI mode is available for backwards compatibility.
 
 ## Requirements
 
 - **Python 3.13+**
-- **Docker & Docker Compose** (for web UI deployment)
-- **Microsoft Purview audit log CSV export** (for SharePoint/Exchange analysis)
-- **Microsoft Entra sign-ins CSV export** (for sign-in analysis, optional)
+- **Docker & Docker Compose** (for web UI)
+- **Microsoft Purview audit log CSV export** (SharePoint/OneDrive/Exchange analysis)
+- **Microsoft Entra sign-in CSV export** (sign-in analysis, optional)
 
-**Important Note**: The sign-in analysis feature uses a different data source than the main Purview analysis. While most features analyze data from Microsoft Purview audit logs (SharePoint, OneDrive, Exchange), the `--entra` feature specifically requires a CSV export from Microsoft Entra ID's sign-in logs. These are two separate data sources with different formats and column structures.
+The tool automatically detects SharePoint domains and email domains from your audit data, ensuring seamless integration with any Microsoft 365 tenant.
 
-The tool automatically detects SharePoint domains and email domains from your audit data, making it work seamlessly with any Microsoft 365 tenant.
+## Web UI Workflow
+
+1. **Upload**: Select your Purview audit log CSV (and optional user mapping CSV)
+2. **Analyze**: System processes and displays all records with pattern detection
+3. **Filter**: Use dropdowns and text fields to narrow results:
+   - Workload (Exchange, SharePoint, etc.)
+   - User (exact or dropdown selection)
+   - Operation (SendAs, FileDownloaded, etc.)
+   - IP Address (exact, multiple comma-separated, or wildcard patterns)
+   - Date/Time range
+4. **Explore**: View timeline, export filtered data, analyze patterns
+5. **Export**: Download Exchange activity or access results via JSON API
 
 ## Architecture
 
-### Web UI Architecture (Docker)
+### Web UI Stack
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   Docker Environment                     │
-├─────────────────────────────────────────────────────────┤
-│                                                           │
-│  ┌──────────────────┐        ┌──────────────────┐       │
-│  │  Flask Web App   │◄──────►│  Redis Session   │       │
-│  │  (Port 5000)     │        │  Cache (Port     │       │
-│  │  - Upload        │        │  6379)           │       │
-│  │  - Analysis      │        │  - User Sessions │       │
-│  │  - JSON API      │        │  - File Uploads  │       │
-│  └──────────────────┘        └──────────────────┘       │
-│         ▲                                                 │
-│         │ HTTP                                           │
-└─────────┼─────────────────────────────────────────────────┘
-          │
-     Browser (localhost:5000)
+┌──────────────────────────────────────────────────────────┐
+│                   Docker Environment                      │
+├──────────────────────────────────────────────────────────┤
+│                                                            │
+│  ┌───────────────────┐         ┌────────────────────┐    │
+│  │   Flask Web App   │◄───────►│  Redis Session     │    │
+│  │   (Port 5000)     │         │  Cache             │    │
+│  │   - File Upload   │         │  (Port 6379)       │    │
+│  │   - Analysis API  │         │  - Sessions        │    │
+│  │   - JSON API      │         │  - File Metadata   │    │
+│  │   - HTML UI       │         │  - Filters         │    │
+│  └───────────────────┘         └────────────────────┘    │
+│           ▲                                                │
+│           │ HTTP/WebSocket                               │
+└───────────┼────────────────────────────────────────────────┘
+            │
+      Browser UI
+      (localhost:5000)
 ```
 
-### CLI Architecture
+### Data Flow
 
-Direct Python execution with command-line arguments, no web server required.
+1. User uploads CSV file → Flask stores in Redis session
+2. DataFrame parsed and indexed for filtering
+3. Frontend applies filters in real-time (client-side)
+4. Pattern detection runs on filtered subset
+5. Results cached for multi-session access
+
+## About This Project
+
+**purrrr** is a detached fork of [purviewer](https://github.com/LL7Baucarre/purviewer), refactored to focus exclusively on the web UI experience. Original features (CLI analysis, JSON output) are maintained for backwards compatibility, but all development prioritizes the interactive web interface.
+
+**Key improvements over purviewer**:
+- Modern web UI with real-time filtering
+- Pattern detection and anomaly highlighting
+- Wildcard IP filtering support
+- Session-based multi-file analysis
+- Docker-ready deployment
+- Interactive pattern visualization
 
 ## License
 
