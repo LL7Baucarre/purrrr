@@ -1,13 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "==========================="
-echo "purrrr Web Application"
-echo "==========================="
-
 # Wait for Redis to be ready
 if [ "${REDIS_URL:-}" ]; then
-    echo "⏳ Waiting for Redis to be available..."
+    echo "Waiting for Redis to be availabsle..."
     max_attempts=30
     attempt=0
     while [ $attempt -lt $max_attempts ]; do
@@ -17,7 +13,7 @@ import sys
 try:
     r = redis.from_url('${REDIS_URL}')
     r.ping()
-    print('✅ Redis is ready')
+    print('Redis is ready')
     sys.exit(0)
 except Exception as e:
     sys.exit(1)
@@ -34,7 +30,7 @@ except Exception as e:
         sleep 2
     done
 else
-    echo "ℹ️  No Redis URL configured, using filesystem sessions"
+    echo "No Redis URL configured, using filesystem sessions"
 fi
 
 # Create upload directory
@@ -42,7 +38,7 @@ mkdir -p /tmp/purrrr
 chmod 755 /tmp/purrrr
 
 echo ""
-echo "🚀 Starting Flask application..."
+echo "Starting Flask application..."
 echo "   Access: http://0.0.0.0:5000"
 echo "   Max file size: ${MAX_FILE_SIZE:-500}MB"
 echo ""

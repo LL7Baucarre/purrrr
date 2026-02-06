@@ -6,6 +6,16 @@ let currentLogType = null;
 let analysisData = {};
 let currentFilters = {};
 
+// Column visibility configuration
+const AVAILABLE_COLUMNS = [
+    { key: 'timestamp', label: 'Date/Heure', visible: true, width: '20%' },
+    { key: 'operation', label: 'Opération', visible: true, width: '15%' },
+    { key: 'subject', label: 'Détails', visible: true, width: '25%' },
+    { key: 'user', label: 'Utilisateur', visible: true, width: '20%' },
+    { key: 'Workload', label: 'Workload', visible: false, width: '10%' },
+    { key: 'folder', label: 'Dossier', visible: false, width: '15%' }
+];
+
 // DOM Elements
 const uploadForm = document.getElementById('upload-form');
 const uploadSection = document.getElementById('upload-section');
@@ -18,6 +28,7 @@ const navbarStatus = document.getElementById('navbar-status');
 // Initialize
 document.addEventListener('DOMContentLoaded', function () {
     setupEventListeners();
+    initializeColumnSelectors();
 });
 
 function setupEventListeners() {
@@ -34,7 +45,9 @@ function setupEventListeners() {
     if (itemsPerPageSelector) {
         itemsPerPageSelector.addEventListener('change', function () {
             // Re-initialize pagination with new items per page value
-            loadTabData('exchange-content');
+            if (window.timelineCurrentOperations && window.timelineCurrentOperations.length > 0) {
+                initializeTimelinePagination(window.timelineCurrentOperations);
+            }
         });
     }
 
@@ -50,6 +63,84 @@ function setupEventListeners() {
     if (resetFiltersBtn) {
         resetFiltersBtn.addEventListener('click', resetFilters);
     }
+    
+    // Add file form
+    const addFileForm = document.getElementById('add-file-form');
+    const addFileSubmitBtn = document.getElementById('add-file-submit-btn');
+    if (addFileForm && addFileSubmitBtn) {
+        addFileForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            handleAddFile();
+        });
+        addFileSubmitBtn.addEventListener('click', handleAddFile);
+    }
+}
+
+function initializeColumnSelectors() {
+    const columnsCheckboxes = document.getElementById('columns-checkboxes');
+    if (!columnsCheckboxes) return;
+    
+    columnsCheckboxes.innerHTML = '';
+    AVAILABLE_COLUMNS.forEach(col => {
+        const checkbox = document.createElement('div');
+        checkbox.className = 'form-check';
+        checkbox.innerHTML = `
+            <input class="form-check-input column-checkbox" type="checkbox" id="col-${col.key}" value="${col.key}" ${col.visible ? 'checked' : ''}>
+            <label class="form-check-label" for="col-${col.key}">
+                ${col.label}
+            </label>
+        `;
+        columnsCheckboxes.appendChild(checkbox);
+        
+        // Add change event listener
+        checkbox.querySelector('input').addEventListener('change', (e) => {
+            const colKey = e.target.value;
+            const colIndex = AVAILABLE_COLUMNS.findIndex(c => c.key === colKey);
+            if (colIndex !== -1) {
+                AVAILABLE_COLUMNS[colIndex].visible = e.target.checked;
+            }
+            
+            // Re-render the table header and rows
+            renderTableHeader();
+            if (window.timelineCurrentOperations && window.timelineCurrentOperations.length > 0) {
+                updateTimelinePage(window.timelineCurrentPage || 1);
+            }
+        });
+    });
+}
+
+function renderTableHeader() {
+    const headerRow = document.getElementById('timeline-header');
+    if (!headerRow) return;
+    
+    headerRow.innerHTML = '';
+    const visibleCols = AVAILABLE_COLUMNS.filter(col => col.visible);
+    
+    visibleCols.forEach((col, index) => {
+        const th = document.createElement('th');
+        th.style.width = col.width;
+        th.textContent = col.label;
+        headerRow.appendChild(th);
+    });
+}
+
+function getColumnValue(op, colKey) {
+    switch(colKey) {
+        case 'timestamp':
+            return op.timestamp ? new Date(op.timestamp).toLocaleString('fr-FR') : '-';
+        case 'operation':
+            return `<span class="badge bg-info">${op.operation || '-'}</span>`;
+        case 'subject':
+            return `<small title="${op.subject || ''}">${op.subject || op.folder || '-'}</small>`;
+        case 'user':
+            return `<small class="text-muted">${op.user || '-'}</small>`;
+        case 'Workload':
+            return `<small>${op.Workload || '-'}</small>`;
+        case 'folder':
+            return `<small class="text-muted" title="${op.folder || ''}">${op.folder || '-'}</small>`;
+        default:
+            return '-';
+    }
 }
 
 function getFiltersFromUI() {
@@ -59,16 +150,157 @@ function getFiltersFromUI() {
         files: document.getElementById('filter-files')?.value || '',
         ips: document.getElementById('filter-ips')?.value || '',
         exclude_ips: document.getElementById('exclude-ips')?.value || '',
-        start_date: document.getElementById('filter-start-date')?.value || '',
-        end_date: document.getElementById('filter-end-date')?.value || '',
+        start_date: document.getElementById('filter-date-start')?.value || '',
+        end_date: document.getElementById('filter-date-end')?.value || '',
         sort_by: document.getElementById('filter-sort-by')?.value || 'date'
     };
 }
 
+function matchesIpPattern(ip, pattern) {
+    // Trim whitespace
+    ip = ip.trim();
+    pattern = pattern.trim();
+    
+    // If no wildcard, do exact match (case-insensitive for IPs)
+    if (!pattern.includes('*')) {
+        return ip === pattern;
+    }
+    
+    // Convert wildcard pattern to regex
+    // First escape special regex chars, but keep track of * positions
+    const regexPattern = pattern
+        .split('')
+        .map(char => {
+            // Keep * as is for now, will be replaced later
+            if (char === '*') return '\u0000';  // Temporary placeholder
+            // Escape all special regex chars
+            if (/[.+?^${}()|[\]\\]/.test(char)) {
+                return '\\' + char;
+            }
+            return char;
+        })
+        .join('')
+        .replace(/\u0000/g, '.*');  // Replace placeholder with .*
+    
+    try {
+        const regex = new RegExp('^' + regexPattern + '$');
+        return regex.test(ip);
+    } catch (e) {
+        // If regex fails, fallback to exact match
+        return ip === pattern;
+    }
+}
+
+function filterIpsList(clientIp, ipFilterString) {
+    // If no filter, allow all
+    if (!ipFilterString || ipFilterString.trim() === '') {
+        return true;
+    }
+    
+    // Split by comma and trim each IP pattern
+    const patterns = ipFilterString.split(',').map(p => p.trim()).filter(p => p.length > 0);
+    
+    // Check if the IP matches any of the patterns
+    return patterns.some(pattern => matchesIpPattern(clientIp, pattern));
+}
+
 function applyFilters() {
-    currentFilters = getFiltersFromUI();
-    // Reload exchange data with new filters
-    loadTabData('exchange-content');
+    // Apply timeline filters with the selected values
+    const filterWorkload = document.getElementById('filter-workload')?.value || '';
+    const filterUser = document.getElementById('filter-user')?.value || '';
+    const filterActions = document.getElementById('filter-actions')?.value || '';
+    const filterFiles = document.getElementById('filter-files')?.value || '';
+    const filterIps = document.getElementById('filter-ips')?.value || '';
+    const excludeIps = document.getElementById('exclude-ips')?.value || '';
+    const filterDateStart = document.getElementById('filter-date-start')?.value || '';
+    const filterDateEnd = document.getElementById('filter-date-end')?.value || '';
+    
+    // Get the original operations (before any filtering)
+    const originalOps = window.timelineOriginalOperations || window.timelineAllOperations || [];
+    if (!originalOps || originalOps.length === 0) return;
+    
+    let filtered = originalOps.filter(op => {
+        // Filtre workload
+        if (filterWorkload && op.Workload?.toLowerCase() !== filterWorkload.toLowerCase()) {
+            return false;
+        }
+        
+        // Filtre utilisateur (dropdown value)
+        if (filterUser && op.user?.toLowerCase() !== filterUser.toLowerCase()) {
+            return false;
+        }
+        
+        // Filtre opération (dropdown value)
+        if (filterActions && op.operation?.toLowerCase() !== filterActions.toLowerCase()) {
+            return false;
+        }
+        
+        // Filtre fichiers
+        if (filterFiles && !op.subject?.toLowerCase().includes(filterFiles.toLowerCase()) && 
+                          !op.folder?.toLowerCase().includes(filterFiles.toLowerCase())) {
+            return false;
+        }
+        
+        // Filtre IP à inclure - support multiple IPs and wildcards
+        if (filterIps) {
+            const clientIp = op.ClientIP || op.client_ip || op.ClientIPAddress || op.SenderIp || '';
+            if (!filterIpsList(clientIp, filterIps)) {
+                return false;
+            }
+        }
+        
+        // Filtre IP à exclure - support multiple IPs and wildcards
+        if (excludeIps) {
+            const clientIp = op.ClientIP || op.client_ip || op.ClientIPAddress || op.SenderIp || '';
+            if (filterIpsList(clientIp, excludeIps)) {
+                return false;
+            }
+        }
+        
+        // Filtre date de début
+        if (filterDateStart) {
+            const opDate = op.timestamp ? new Date(op.timestamp) : null;
+            const startDate = new Date(filterDateStart);
+            if (!opDate || opDate < startDate) {
+                return false;
+            }
+        }
+        
+        // Filtre date de fin
+        if (filterDateEnd) {
+            const opDate = op.timestamp ? new Date(op.timestamp) : null;
+            const endDate = new Date(filterDateEnd);
+            // Set end date to end of day (23:59:59)
+            endDate.setHours(23, 59, 59, 999);
+            if (!opDate || opDate > endDate) {
+                return false;
+            }
+        }
+        
+        return true;
+    });
+    
+    // Sort by timestamp (descending - most recent first)
+    filtered.sort((a, b) => {
+        const dateA = a.timestamp ? new Date(a.timestamp) : new Date(0);
+        const dateB = b.timestamp ? new Date(b.timestamp) : new Date(0);
+        return dateB - dateA;
+    });
+    
+    // Update the global operations to the filtered set
+    window.timelineAllOperations = filtered;
+    
+    // Update badge with filtered count
+    const badge = document.getElementById('badge-timeline');
+    if (badge) {
+        badge.textContent = filtered.length.toLocaleString();
+    }
+    
+    // Analyze patterns in filtered data
+    analyzePatterns(filtered);
+    
+    // Re-initialize pagination with filtered data
+    initializeTimelinePagination(filtered);
 }
 
 function resetFilters() {
@@ -77,10 +309,29 @@ function resetFilters() {
     document.getElementById('filter-files').value = '';
     document.getElementById('filter-ips').value = '';
     document.getElementById('exclude-ips').value = '';
-    document.getElementById('filter-start-date').value = '';
-    document.getElementById('filter-end-date').value = '';
-    document.getElementById('filter-sort-by').value = 'date';
+    document.getElementById('filter-date-start').value = '';
+    document.getElementById('filter-date-end').value = '';
+    const sortDropdown = document.getElementById('filter-sort-by');
+    if (sortDropdown) {
+        sortDropdown.value = 'date';
+    }
     currentFilters = {};
+    
+    // Reset pagination to show all original data
+    if (window.timelineOriginalOperations) {
+        window.timelineAllOperations = window.timelineOriginalOperations;
+        
+        // Update badge with total count
+        const badge = document.getElementById('badge-timeline');
+        if (badge) {
+            badge.textContent = window.timelineOriginalOperations.length.toLocaleString();
+        }
+        
+        // Analyze patterns in original data
+        analyzePatterns(window.timelineOriginalOperations);
+        
+        initializeTimelinePagination(window.timelineOriginalOperations);
+    }
 }
 
 function updateFileInputStatus(elementId, value) {
@@ -89,6 +340,67 @@ function updateFileInputStatus(elementId, value) {
         element.style.display = 'inline';
     } else {
         element.style.display = 'none';
+    }
+}
+
+function populateFilterDropdowns(operations) {
+    // Extract unique users, operations, and workloads from the operations data
+    // Deduplicate users case-insensitively
+    const userMap = new Map(); // Map with lowercase key -> original value
+    const uniqueOperations = new Set();
+    const uniqueWorkloads = new Set();
+    
+    operations.forEach(op => {
+        if (op.user) {
+            const lowerUser = op.user.toLowerCase();
+            if (!userMap.has(lowerUser)) {
+                userMap.set(lowerUser, op.user);
+            }
+        }
+        if (op.operation) uniqueOperations.add(op.operation);
+        if (op.Workload) uniqueWorkloads.add(op.Workload);
+    });
+    
+    // Sort and populate workload dropdown
+    const workloadSelect = document.getElementById('filter-workload');
+    if (workloadSelect) {
+        const currentValue = workloadSelect.value;
+        workloadSelect.innerHTML = '<option value="">Toutes les workloads</option>';
+        Array.from(uniqueWorkloads).sort().forEach(workload => {
+            const option = document.createElement('option');
+            option.value = workload;
+            option.textContent = workload;
+            workloadSelect.appendChild(option);
+        });
+        workloadSelect.value = currentValue;
+    }
+    
+    // Sort and populate user dropdown
+    const userSelect = document.getElementById('filter-user');
+    if (userSelect) {
+        const currentValue = userSelect.value;
+        userSelect.innerHTML = '<option value="">Tous les utilisateurs</option>';
+        Array.from(userMap.values()).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).forEach(user => {
+            const option = document.createElement('option');
+            option.value = user;
+            option.textContent = user;
+            userSelect.appendChild(option);
+        });
+        userSelect.value = currentValue;
+    }
+    
+    // Sort and populate operations dropdown
+    const actionsSelect = document.getElementById('filter-actions');
+    if (actionsSelect) {
+        const currentValue = actionsSelect.value;
+        actionsSelect.innerHTML = '<option value="">Toutes les actions</option>';
+        Array.from(uniqueOperations).sort().forEach(operation => {
+            const option = document.createElement('option');
+            option.value = operation;
+            option.textContent = operation;
+            actionsSelect.appendChild(option);
+        });
+        actionsSelect.value = currentValue;
     }
 }
 
@@ -105,7 +417,6 @@ async function handleFileUpload(e) {
     submitBtn.disabled = true;
     document.getElementById('upload-spinner').style.display = 'inline-block';
     document.getElementById('submit-text').textContent = 'Traitement...';
-    document.getElementById('upload-progress').style.display = 'block';
     document.getElementById('upload-error').style.display = 'none';
 
     try {
@@ -149,8 +460,100 @@ async function handleFileUpload(e) {
         submitBtn.disabled = false;
         document.getElementById('upload-spinner').style.display = 'none';
         document.getElementById('submit-text').textContent = 'Analyser les données';
-        document.getElementById('upload-progress').style.display = 'none';
     }
+}
+
+async function handleAddFile() {
+    const fileInput = document.getElementById('additional-csv-file');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        showAddFileError('Veuillez sélectionner un fichier CSV');
+        return;
+    }
+    
+    if (!currentSessionId) {
+        showAddFileError('Aucune session active. Veuillez d\'abord charger un fichier');
+        return;
+    }
+
+    // Show loading state
+    const addFileSubmitBtn = document.getElementById('add-file-submit-btn');
+    const addFileSpinner = document.getElementById('add-file-spinner');
+    const addFileText = document.getElementById('add-file-text');
+    
+    addFileSubmitBtn.disabled = true;
+    addFileSpinner.style.display = 'inline-block';
+    addFileText.textContent = 'Ajout en cours...';
+    document.getElementById('add-file-error').style.display = 'none';
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch(`/api/upload/${currentSessionId}`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Erreur lors du téléchargement');
+        }
+
+        const data = await response.json();
+        
+        // Update file info with accumulated info
+        const rowsElement = document.getElementById('info-rows');
+        if (rowsElement) {
+            const currentRows = parseInt(rowsElement.textContent.replace(/\s/g, ''));
+            rowsElement.textContent = (currentRows + data.rows_added).toLocaleString();
+        }
+
+        // Close modal
+        const modal = bootstrap.Modal.getInstance(document.getElementById('addFileModal'));
+        modal.hide();
+        
+        // Reset form
+        document.getElementById('add-file-form').reset();
+        fileInput.value = '';
+        
+        // Reload analysis data
+        await loadAnalysisData('exchange');
+        
+        // Show success message
+        showSuccessMessage('Fichier supplémentaire chargé avec succès');
+
+    } catch (error) {
+        console.error('Add file error:', error);
+        showAddFileError(error.message);
+    } finally {
+        addFileSubmitBtn.disabled = false;
+        addFileSpinner.style.display = 'none';
+        addFileText.textContent = 'Ajouter les données';
+    }
+}
+
+function showAddFileError(message) {
+    const errorDiv = document.getElementById('add-file-error');
+    const errorMessage = document.getElementById('add-file-error-message');
+    errorMessage.textContent = message;
+    errorDiv.style.display = 'block';
+}
+
+function showSuccessMessage(message) {
+    const alertDiv = document.createElement('div');
+    alertDiv.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 end-0 m-3';
+    alertDiv.style.zIndex = '9999';
+    alertDiv.innerHTML = `
+        <i class="fas fa-check-circle me-2"></i>${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    document.body.appendChild(alertDiv);
+    
+    setTimeout(() => {
+        alertDiv.remove();
+    }, 4000);
 }
 
 async function loadTabData(tabId) {
@@ -538,6 +941,8 @@ function renderOperationDetails(operation, auditData) {
         return renderMailAccessDetails(auditData);
     } else if (operation === 'MoveToDeletedItems') {
         return renderMoveDetails(auditData);
+    } else if (operation === 'TIMailData') {
+        return renderTIMailDataDetails(auditData);
     } else {
         return renderGenericOperationDetails(operation, auditData);
     }
@@ -784,6 +1189,206 @@ function renderMoveDetails(auditData) {
                     ${affectedItems.length > 5 ? `<div class="text-muted mt-2"><em>... et ${affectedItems.length - 5} autres éléments</em></div>` : ''}
                 </div>
                 ` : ''}
+            </div>
+        </div>
+    `;
+}
+
+// Fonction pour afficher les détails des données Threat Intelligence Mail
+function renderTIMailDataDetails(auditData) {
+    const recipientList = auditData.Recipients || [];
+    const attachments = auditData.AttachmentData || [];
+    const authDetails = auditData.AuthDetails || [];
+    const threats = auditData.ThreatsAndDetectionTech || [];
+    
+    // Déterminer la couleur du verdict
+    const verdictColors = {
+        'Phish': 'danger',
+        'Malware': 'danger',
+        'Spam': 'warning',
+        'Clean': 'success',
+        'Unknown': 'secondary'
+    };
+    const verdictColor = verdictColors[auditData.Verdict] || 'secondary';
+    
+    return `
+        <div class="info-section mt-3">
+            <h6 class="info-section-title">
+                <i class="fas fa-shield-alt me-2"></i> Threat Intelligence - Détails du Mail
+            </h6>
+            <div class="info-section-content">
+                <!-- Sujet et Verdict -->
+                <div class="json-item">
+                    <span class="json-key">Sujet:</span>
+                    <span class="json-value"><strong>"${auditData.Subject || '-'}"</strong></span>
+                </div>
+                
+                <div class="json-item">
+                    <span class="json-key">Verdict:</span>
+                    <span class="json-value"><span class="badge bg-${verdictColor}">${auditData.Verdict || 'Unknown'}</span></span>
+                </div>
+                
+                ${auditData.PhishConfidenceLevel ? `
+                <div class="json-item">
+                    <span class="json-key">Niveau de confiance Phish:</span>
+                    <span class="json-value"><strong>${auditData.PhishConfidenceLevel}</strong></span>
+                </div>
+                ` : ''}
+                
+                <!-- Expéditeur et Destinataires -->
+                <div class="json-subsection mt-3">
+                    <h6 class="text-info"><i class="fas fa-envelope me-2"></i>Informations d'Email</h6>
+                    
+                    <div class="json-item">
+                        <span class="json-key">Expéditeur (P1):</span>
+                        <span class="json-value"><code>${auditData.P1Sender || '-'}</code></span>
+                    </div>
+                    
+                    ${auditData.P2Sender && auditData.P2Sender !== auditData.P1Sender ? `
+                    <div class="json-item">
+                        <span class="json-key">Expéditeur (P2):</span>
+                        <span class="json-value"><code>${auditData.P2Sender}</code></span>
+                    </div>
+                    ` : ''}
+                    
+                    ${recipientList.length > 0 ? `
+                    <div class="json-item">
+                        <span class="json-key">Destinataires:</span>
+                        <span class="json-value">
+                            <ul class="list-unstyled mb-0 ms-3">
+                                ${recipientList.map(r => `<li><code>${r}</code></li>`).join('')}
+                            </ul>
+                        </span>
+                    </div>
+                    ` : ''}
+                    
+                    <div class="json-item">
+                        <span class="json-key">IP Expéditeur:</span>
+                        <span class="json-value"><code>${auditData.SenderIp || '-'}</code></span>
+                    </div>
+                </div>
+                
+                <!-- Détection des Menaces -->
+                ${threats.length > 0 ? `
+                <div class="json-subsection mt-3">
+                    <h6 class="text-danger"><i class="fas fa-exclamation-triangle me-2"></i>Menaces Détectées</h6>
+                    ${threats.map(threat => `
+                    <div class="json-item">
+                        <span class="json-value badge bg-danger">${threat}</span>
+                    </div>
+                    `).join('')}
+                    
+                    ${auditData.DetectionMethod ? `
+                    <div class="json-item mt-2">
+                        <span class="json-key">Méthode de détection:</span>
+                        <span class="json-value">${auditData.DetectionMethod}</span>
+                    </div>
+                    ` : ''}
+                    
+                    ${auditData.DetectionType ? `
+                    <div class="json-item">
+                        <span class="json-key">Type de détection:</span>
+                        <span class="json-value">${auditData.DetectionType}</span>
+                    </div>
+                    ` : ''}
+                </div>
+                ` : ''}
+                
+                <!-- Authentification -->
+                ${authDetails.length > 0 ? `
+                <div class="json-subsection mt-3">
+                    <h6 class="text-success"><i class="fas fa-check-circle me-2"></i>Vérifications d'Authentification</h6>
+                    ${authDetails.map(auth => {
+                        const isPass = auth.Value === 'Pass' || auth.Value === 'pass';
+                        return `
+                        <div class="json-item">
+                            <span class="json-key">${auth.Name}:</span>
+                            <span class="json-value">
+                                <span class="badge ${isPass ? 'bg-success' : 'bg-warning'} text-white">
+                                    ${auth.Value}
+                                </span>
+                            </span>
+                        </div>
+                        `;
+                    }).join('')}
+                </div>
+                ` : ''}
+                
+                <!-- Pièces jointes -->
+                ${attachments.length > 0 ? `
+                <div class="json-subsection mt-3">
+                    <h6 class="text-warning"><i class="fas fa-paperclip me-2"></i>Pièces Jointes (${attachments.length})</h6>
+                    <div style="max-height: 300px; overflow-y: auto;">
+                        <table class="table table-sm table-borderless mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Nom</th>
+                                    <th>Type</th>
+                                    <th>Verdict</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${attachments.map(att => {
+                                    const verdictText = att.FileVerdict === 0 ? 'Clean' : 'Suspicious';
+                                    const verdictClass = att.FileVerdict === 0 ? 'success' : 'warning';
+                                    return `
+                                    <tr>
+                                        <td><small><code>${att.FileName || '-'}</code></small></td>
+                                        <td><small>${att.FileType || '-'}</small></td>
+                                        <td><small><span class="badge bg-${verdictClass}">${verdictText}</span></small></td>
+                                    </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                ` : ''}
+                
+                <!-- Statuts de Livraison -->
+                <div class="json-subsection mt-3">
+                    <h6 class="text-muted"><i class="fas fa-info-circle me-2"></i>Statut de Livraison</h6>
+                    
+                    ${auditData.DeliveryAction ? `
+                    <div class="json-item">
+                        <span class="json-key">Action de livraison:</span>
+                        <span class="json-value">${auditData.DeliveryAction}</span>
+                    </div>
+                    ` : ''}
+                    
+                    ${auditData.OriginalDeliveryLocation ? `
+                    <div class="json-item">
+                        <span class="json-key">Emplacement de livraison d'origine:</span>
+                        <span class="json-value"><code>${auditData.OriginalDeliveryLocation}</code></span>
+                    </div>
+                    ` : ''}
+                    
+                    ${auditData.LatestDeliveryLocation ? `
+                    <div class="json-item">
+                        <span class="json-key">Dernier emplacement de livraison:</span>
+                        <span class="json-value"><code>${auditData.LatestDeliveryLocation}</code></span>
+                    </div>
+                    ` : ''}
+                </div>
+                
+                <!-- Timestamps -->
+                <div class="json-subsection mt-3">
+                    <h6 class="text-muted"><i class="fas fa-clock me-2"></i>Horodatages</h6>
+                    
+                    ${auditData.CreationTime ? `
+                    <div class="json-item">
+                        <span class="json-key">Créé le:</span>
+                        <span class="json-value"><small>${formatDate(auditData.CreationTime)}</small></span>
+                    </div>
+                    ` : ''}
+                    
+                    ${auditData.MessageTime ? `
+                    <div class="json-item">
+                        <span class="json-key">Temps du message:</span>
+                        <span class="json-value"><small>${formatDate(auditData.MessageTime)}</small></span>
+                    </div>
+                    ` : ''}
+                </div>
             </div>
         </div>
     `;
@@ -1102,17 +1707,18 @@ function updateTimelinePage(pageNumber) {
     const pageOps = operations.slice(startIdx, endIdx);
     
     timelineTable.innerHTML = '';
+    const visibleCols = AVAILABLE_COLUMNS.filter(col => col.visible);
+    
     pageOps.forEach((op, pageIndex) => {
         const row = document.createElement('tr');
         row.style.cursor = 'pointer';
-        row.innerHTML = `
-            <td><small class="text-muted">${op.timestamp ? new Date(op.timestamp).toLocaleString('fr-FR') : '-'}</small></td>
-            <td><span class="badge bg-info">${op.operation || '-'}</span></td>
-            <td>
-                <small title="${op.subject || ''}">${op.subject || op.folder || '-'}</small>
-            </td>
-            <td><small class="text-muted">${op.user || '-'}</small></td>
-        `;
+        
+        let htmlContent = '';
+        visibleCols.forEach(col => {
+            const value = getColumnValue(op, col.key);
+            htmlContent += `<td>${value}</td>`;
+        });
+        row.innerHTML = htmlContent;
         
         // Add click event to show details modal
         row.addEventListener('click', () => {
@@ -1196,54 +1802,151 @@ function displayExchange(data) {
         window.timelineOriginalOperations = sorted;
         window.timelineAllOperations = sorted;
         
+        // Populate filter dropdowns with unique values
+        populateFilterDropdowns(sorted);
+        
+        // Render table header with columns
+        renderTableHeader();
+        
         if (sorted.length === 0) {
-            timelineTable.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">Aucune donnée</td></tr>';
+            timelineTable.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-3">Aucune donnée</td></tr>';
         } else {
             // Initialize timeline pagination
             initializeTimelinePagination(sorted);
+            
+            // Analyze patterns
+            analyzePatterns(sorted);
         }
     }
+}
+
+function analyzePatterns(operations) {
+    if (!operations || operations.length === 0) {
+        document.getElementById('badge-patterns').textContent = '0';
+        return;
+    }
+
+    // Count pattern occurrences
+    const patterns = {
+        userIp: {},      // user -> ip -> count
+        userOp: {},      // user -> operation -> count
+        opIp: {},        // operation -> ip -> count
+        userOpIp: {}     // user -> operation -> ip -> count
+    };
+
+    operations.forEach(op => {
+        const user = op.user || 'Inconnu';
+        const ip = op.ClientIP || op.client_ip || op.ClientIPAddress || op.SenderIp || 'Inconnu';
+        const operation = op.operation || 'Inconnu';
+
+        // User + IP pattern
+        if (!patterns.userIp[user]) patterns.userIp[user] = {};
+        patterns.userIp[user][ip] = (patterns.userIp[user][ip] || 0) + 1;
+
+        // User + Operation pattern
+        if (!patterns.userOp[user]) patterns.userOp[user] = {};
+        patterns.userOp[user][operation] = (patterns.userOp[user][operation] || 0) + 1;
+
+        // Operation + IP pattern
+        if (!patterns.opIp[operation]) patterns.opIp[operation] = {};
+        patterns.opIp[operation][ip] = (patterns.opIp[operation][ip] || 0) + 1;
+
+        // User + Operation + IP pattern
+        const key = `${user}|${operation}|${ip}`;
+        patterns.userOpIp[key] = (patterns.userOpIp[key] || 0) + 1;
+    });
+
+    // Render patterns in tables
+    renderPatternTable('pattern-user-ip', patterns.userIp, 2);
+    renderPatternTable('pattern-user-op', patterns.userOp, 2);
+    renderPatternTable('pattern-op-ip', patterns.opIp, 2);
+    renderComplexPatternTable('pattern-user-op-ip', patterns.userOpIp);
+
+    // Update badge with total unique patterns
+    const totalPatterns = Object.keys(patterns.userOpIp).length;
+    document.getElementById('badge-patterns').textContent = totalPatterns.toLocaleString();
+}
+
+function renderPatternTable(tableId, patterns, columnCount) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
     
-    // Ajouter les filtres après le tableau chronologie
-    const filtersContainer = document.getElementById('exchange-filters');
-    if (filtersContainer) {
-        filtersContainer.innerHTML = `
-            <div class="mt-4 p-3 bg-light rounded">
-                <h6 class="mb-3"><i class="fas fa-filter me-2"></i>Filtres</h6>
-                <div class="row g-3">
-                    <div class="col-md-6">
-                        <label class="form-label small"><strong>IP Client</strong></label>
-                        <input type="text" id="filter-ips" class="form-control form-control-sm" placeholder="Filtrer par IP (ex: 192.168.1.1)">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small"><strong>Exclure IP</strong></label>
-                        <input type="text" id="exclude-ips" class="form-control form-control-sm" placeholder="Exclure IP (ex: 127.0.0.1)">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small"><strong>Utilisateur</strong></label>
-                        <input type="text" id="filter-user" class="form-control form-control-sm" placeholder="Filtrer par utilisateur">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small"><strong>Opération</strong></label>
-                        <input type="text" id="filter-operation" class="form-control form-control-sm" placeholder="Filtrer par opération">
-                    </div>
-                    <div class="col-12">
-                        <button class="btn btn-sm btn-primary me-2" onclick="applyTimelineFilters()"><i class="fas fa-search me-1"></i>Appliquer</button>
-                        <button class="btn btn-sm btn-secondary" onclick="resetTimelineFilters()"><i class="fas fa-redo me-1"></i>Réinitialiser</button>
-                    </div>
-                </div>
-            </div>
+    tbody.innerHTML = '';
+
+    // Flatten patterns to arrays and sort by count
+    const items = [];
+    Object.keys(patterns).forEach(key1 => {
+        Object.keys(patterns[key1]).forEach(key2 => {
+            items.push({
+                col1: key1,
+                col2: key2,
+                count: patterns[key1][key2]
+            });
+        });
+    });
+
+    if (items.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="${columnCount + 1}" class="text-center text-muted py-3"><small>Aucun pattern détecté</small></td></tr>`;
+        return;
+    }
+
+    // Sort by count descending (top 50)
+    items.sort((a, b) => b.count - a.count);
+    items.slice(0, 50).forEach(item => {
+        const row = document.createElement('tr');
+        const countBadgeClass = item.count > 20 ? 'danger' : item.count > 10 ? 'warning' : 'info';
+        row.innerHTML = `
+            <td><small title="${item.col1}">${item.col1.length > 40 ? item.col1.substring(0, 40) + '...' : item.col1}</small></td>
+            <td><small title="${item.col2}">${item.col2.length > 40 ? item.col2.substring(0, 40) + '...' : item.col2}</small></td>
+            <td class="text-end"><span class="badge bg-${countBadgeClass}">${item.count}</span></td>
         `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderComplexPatternTable(tableId, patterns) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    
+    tbody.innerHTML = '';
+
+    // Convert patterns object to sorted array
+    const items = Object.keys(patterns).map(key => {
+        const [user, operation, ip] = key.split('|');
+        return {
+            user,
+            operation,
+            ip,
+            count: patterns[key]
+        };
+    });
+
+    if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3"><small>Aucun pattern détecté</small></td></tr>';
+        return;
     }
-    const rawViewDiv = document.getElementById('exchange-raw-view');
-    if (rawViewDiv) {
-        try {
-            const jsonStr = JSON.stringify(data, null, 2);
-            rawViewDiv.textContent = jsonStr;
-        } catch (e) {
-            rawViewDiv.textContent = 'Erreur lors du parsing des données';
-        }
-    }
+
+    // Sort by count descending (top 50)
+    items.sort((a, b) => b.count - a.count);
+    items.slice(0, 50).forEach(item => {
+        const row = document.createElement('tr');
+        const countBadgeClass = item.count > 20 ? 'danger' : item.count > 10 ? 'warning' : 'info';
+        const userDisplay = item.user.length > 25 ? item.user.substring(0, 25) + '...' : item.user;
+        const ipDisplay = item.ip.length > 18 ? item.ip.substring(0, 18) + '...' : item.ip;
+        row.innerHTML = `
+            <td><small title="${item.user}">${userDisplay}</small></td>
+            <td><small><span class="badge bg-secondary" title="${item.operation}">${item.operation.length > 30 ? item.operation.substring(0, 30) + '...' : item.operation}</span></small></td>
+            <td><small title="${item.ip}">${ipDisplay}</small></td>
+            <td class="text-end"><span class="badge bg-${countBadgeClass}">${item.count}</span></td>
+        `;
+        tbody.appendChild(row);
+    });
 }
 
 function createOperationsChart(operations) {
@@ -1373,14 +2076,20 @@ function applyTimelineFilters() {
     if (!originalOps || originalOps.length === 0) return;
     
     let filtered = originalOps.filter(op => {
-        // Filtre IP à inclure
-        if (filterIps && !op.client_ip?.includes(filterIps)) {
-            return false;
+        // Filtre IP à inclure - support multiple field names (client_ip, ClientIPAddress, ClientIP, SenderIp)
+        if (filterIps) {
+            const clientIp = op.ClientIP || op.client_ip || op.ClientIPAddress || op.SenderIp || '';
+            if (!clientIp.includes(filterIps)) {
+                return false;
+            }
         }
         
-        // Filtre IP à exclure
-        if (excludeIps && op.client_ip?.includes(excludeIps)) {
-            return false;
+        // Filtre IP à exclure - support multiple field names
+        if (excludeIps) {
+            const clientIp = op.ClientIP || op.client_ip || op.ClientIPAddress || op.SenderIp || '';
+            if (clientIp.includes(excludeIps)) {
+                return false;
+            }
         }
         
         // Filtre utilisateur

@@ -184,6 +184,61 @@ def upload_file() -> tuple[dict[str, Any], int] | dict[str, Any]:
         return {"error": str(e)}, 500
 
 
+@app.route("/api/upload/<session_id>", methods=["POST"])
+def upload_additional_file(session_id: str) -> tuple[dict[str, Any], int] | dict[str, Any]:
+    """Handle additional file upload and merge with existing session data."""
+    try:
+        if session_id not in sessions:
+            return {"error": "Session not found"}, 404
+
+        if "file" not in request.files:
+            return {"error": "No file provided"}, 400
+
+        file = request.files["file"]
+
+        if not file.filename:
+            return {"error": "No file selected"}, 400
+
+        if not allowed_file(file.filename or ""):
+            return {"error": "Only CSV files are allowed"}, 400
+
+        # Save uploaded file
+        filename = secure_filename(file.filename or "file.csv")
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        file.save(filepath)
+
+        # Load CSV
+        new_df = pd.read_csv(filepath)
+        rows_added = len(new_df)
+
+        # Get existing session
+        session_obj = sessions[session_id]
+        
+        # Merge dataframes
+        session_obj.df = pd.concat([session_obj.df, new_df], ignore_index=True)
+        
+        # Invalidate cache if Redis is available
+        if REDIS_AVAILABLE and app.config.get("SESSION_REDIS"):
+            try:
+                redis_client = app.config["SESSION_REDIS"]
+                redis_key = f"exchange_analysis:{session_id}"
+                redis_client.delete(redis_key)
+                logger.info(f"Invalidated cache for session: {redis_key}")
+            except Exception as e:
+                logger.warning(f"Failed to invalidate Redis cache: {e}")
+
+        return {
+            "session_id": session_id,
+            "rows_added": rows_added,
+            "total_rows": len(session_obj.df),
+            "filename": filename,
+        }
+
+    except Exception as e:
+        logger.error(f"Additional upload error: {e}")
+        return {"error": str(e)}, 500
+
+
 @app.route("/api/analysis/<session_id>/<analysis_type>", methods=["POST"])
 def analyze(session_id: str, analysis_type: str) -> tuple[dict[str, Any], int] | dict[str, Any]:
     """Perform analysis on uploaded data."""
@@ -616,10 +671,19 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
         elif "UserId" in df.columns and pd.notna(row.get("UserId")):
             user = row.get("UserId")
         
+        # Extract IP from the row directly (support multiple field names)
+        client_ip = (row.get("ClientIP") or row.get("ClientIPAddress") or 
+                     row.get("client_ip") or row.get("SenderIp") or "")
+        
         if "AuditData" in df.columns and pd.notna(row.get("AuditData")):
             try:
                 audit_data = json.loads(row.get("AuditData", "{}"))
                 timestamp = audit_data.get("CreationTime", "")
+                
+                # If IP not found in row columns, try to get from AuditData
+                if not client_ip:
+                    client_ip = (audit_data.get("ClientIP") or audit_data.get("ClientIPAddress") or 
+                                audit_data.get("client_ip") or audit_data.get("SenderIp") or "")
                 
                 # Special handling for MailItemsAccessed with Folders structure
                 if operation == "MailItemsAccessed" and "Folders" in audit_data and audit_data["Folders"]:
@@ -637,6 +701,8 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
                                 "subject": item.get("Subject", ""),
                                 "folder": folder_path,
                                 "user": user,
+                                "Workload": audit_data.get("Workload", ""),
+                                "ClientIP": client_ip,
                                 "full_data": audit_data  # Ajouter les données complètes
                             })
                             # Only one item per operation in timeline
@@ -662,6 +728,8 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
                         "subject": subject,
                         "folder": folder,
                         "user": user,
+                        "Workload": audit_data.get("Workload", ""),
+                        "ClientIP": client_ip,
                         "full_data": audit_data  # Ajouter les données complètes
                     })
                 else:
@@ -684,6 +752,8 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
                             "subject": subject,
                             "folder": folder,
                             "user": user,
+                            "Workload": audit_data.get("Workload", ""),
+                            "ClientIP": client_ip,
                             "full_data": audit_data  # Ajouter les données complètes
                         })
                 

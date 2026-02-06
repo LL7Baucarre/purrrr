@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>purrrr - Analyseur de Logs Purview</title>
+    <title>Purrrr - Analyseur de Logs Purview</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
@@ -12,10 +12,11 @@
     <!-- Navigation -->
     <nav class="navbar navbar-dark bg-dark sticky-top shadow">
         <div class="container-fluid">
-            <span class="navbar-brand mb-0 h1">
-                <i class="fas fa-chart-line"></i> purrrr
+            <span class="navbar-brand mb-0 h1 d-flex align-items-center gap-2">
+                <img src="{{ url_for('static', filename='logo.png') }}" alt="Purrrr Logo" height="80">
+                </i> Purrrr
             </span>
-            <span class="navbar-text text-muted" id="navbar-status">Bienvenue</span>
+            <span class="navbar-text text-white-50" id="navbar-status"></span>
         </div>
     </nav>
 
@@ -23,11 +24,17 @@
     <div class="container-fluid py-4">
         <!-- Upload Section -->
         <div id="upload-section" class="section-active">
+            <!-- Logo Section -->
+            <div class="row justify-content-center mb-5">
+                <div class="col-lg-8 text-center">
+                    <img src="{{ url_for('static', filename='logo.png') }}" alt="Purrrr Logo" height="240" class="mb-3">
+                </div>
+            </div>
             <div class="row justify-content-center mb-4">
                 <div class="col-lg-8">
                     <div class="card shadow-lg border-0">
                         <div class="card-header bg-primary text-white py-4">
-                            <h4 class="mb-0"><i class="fas fa-upload"></i> Charger vos données d'audit</h4>
+                            <h4 class="mb-0"><i class="fas fa-upload"></i> Charger l'audit</h4>
                         </div>
                         <div class="card-body p-5">
                             <form id="upload-form" enctype="multipart/form-data">
@@ -56,15 +63,6 @@
                                            style="display:none;"></i>
                                         <span id="submit-text">Analyser les données</span>
                                     </button>
-                                </div>
-
-                                <!-- Progress Bar -->
-                                <div id="upload-progress" style="display:none;" class="mt-4">
-                                    <div class="progress">
-                                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                                             role="progressbar" style="width: 100%"></div>
-                                    </div>
-                                    <p class="text-center text-muted mt-2">Traitement du fichier...</p>
                                 </div>
 
                                 <!-- Error Alert -->
@@ -102,24 +100,58 @@
                         </div>
                         <div class="card-body">
                             <div class="row g-3">
+                                <!-- Workload Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-cube"></i> Workload</label>
+                                    <select class="form-select" id="filter-workload">
+                                        <option value="">Toutes les workloads</option>
+                                    </select>
+                                </div>
+
+                                <!-- User Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-user"></i> Utilisateur</label>
+                                    <select class="form-select" id="filter-user">
+                                        <option value="">Tous les utilisateurs</option>
+                                    </select>
+                                </div>
+
+                                <!-- Actions Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-tasks"></i> Actions</label>
+                                    <select class="form-select" id="filter-actions">
+                                        <option value="">Toutes les actions</option>
+                                    </select>
+                                </div>
+
+                                <!-- Files Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-file"></i> Fichiers</label>
+                                    <input type="text" class="form-control" id="filter-files" placeholder="Mots-clés de fichiers">
+                                </div>
+
+                                <!-- IPs Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-network-wired"></i> Adresses IP</label>
+                                    <input type="text" class="form-control" id="filter-ips" placeholder="192.168.1.*, 10.0.0.50, 172.16.*">
+                                    <small class="form-text text-muted">Virgule pour séparer, * pour wildcard</small>
+                                </div>
+
+                                <!-- Exclude IPs Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-ban"></i> Exclure IPs</label>
+                                    <input type="text" class="form-control" id="exclude-ips" placeholder="192.168.0.*, 127.0.0.1">
+                                    <small class="form-text text-muted">Virgule pour séparer, * pour wildcard</small>
+                                </div>
+
                                 <!-- Date Range Filter -->
                                 <div class="col-md-3">
-                                    <label class="form-label"><i class="fas fa-calendar"></i> Date de début</label>
-                                    <input type="date" class="form-control" id="filter-date-start">
+                                    <label class="form-label"><i class="fas fa-calendar"></i> Date/Heure de début</label>
+                                    <input type="datetime-local" class="form-control" id="filter-date-start">
                                 </div>
                                 <div class="col-md-3">
-                                    <label class="form-label"><i class="fas fa-calendar"></i> Date de fin</label>
-                                    <input type="date" class="form-control" id="filter-date-end">
-                                </div>
-                                
-                                <!-- Sort Options -->
-                                <div class="col-md-3">
-                                    <label class="form-label"><i class="fas fa-sort"></i> Trier par</label>
-                                    <select class="form-select" id="filter-sort-by">
-                                        <option value="date" selected>Date (défaut)</option>
-                                        <option value="filename">Nom du fichier</option>
-                                        <option value="username">Nom d'utilisateur</option>
-                                    </select>
+                                    <label class="form-label"><i class="fas fa-calendar"></i> Date/Heure de fin</label>
+                                    <input type="datetime-local" class="form-control" id="filter-date-end">
                                 </div>
                                 
                                 <!-- Items Per Page -->
@@ -151,29 +183,37 @@
 
             <!-- Exchange Content (Direct Display) -->
             <div id="exchange-content">
-                <!-- Accordion Navigation -->
-                <div class="accordion" id="exchange-accordion">
-
-                    <!-- Timeline - Chronologique -->
-                    <div class="accordion-item">
-                        <h2 class="accordion-header" id="heading-timeline">
-                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" 
-                                    data-bs-target="#collapse-timeline" aria-expanded="false" aria-controls="collapse-timeline">
-                                <i class="fas fa-history me-2"></i> <strong>Chronologie complète</strong>
-                                <span class="badge bg-info ms-auto" id="badge-timeline">0</span>
-                            </button>
-                        </h2>
-                        <div id="collapse-timeline" class="accordion-collapse collapse" 
-                             aria-labelledby="heading-timeline" data-bs-parent="#exchange-accordion">
-                            <div class="accordion-body">
-                                <div style="max-height: 600px; overflow-y: auto;">
+                <!-- Timeline - Chronologie complète (Full Display) -->
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                                <h5 class="mb-0">
+                                    <i class="fas fa-history me-2"></i> <strong>Chronologie complète</strong>
+                                    <span class="badge bg-light text-primary ms-auto" id="badge-timeline">0</span>
+                                </h5>
+                                <button class="btn btn-sm btn-light" id="columns-toggle-btn" type="button" data-bs-toggle="collapse" data-bs-target="#columns-selector">
+                                    <i class="fas fa-columns"></i> Colonnes
+                                </button>
+                            </div>
+                            
+                            <!-- Column Selector -->
+                            <div class="collapse" id="columns-selector">
+                                <div class="card-body bg-light border-bottom">
+                                    <div class="row">
+                                        <div class="col-12">
+                                            <label class="form-label mb-2 fw-bold">Sélectionner les colonnes à afficher:</label>
+                                            <div id="columns-checkboxes" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px;"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="card-body">
+                                <div style="max-height: 800px; overflow-y: auto; overflow-x: auto;">
                                     <table class="table table-sm table-hover mb-0" id="exchange-timeline">
                                         <thead class="table-light sticky-top">
-                                            <tr>
-                                                <th style="width: 20%;">Date/Heure</th>
-                                                <th style="width: 20%;">Opération</th>
-                                                <th style="width: 30%;">Détails</th>
-                                                <th style="width: 30%;">Utilisateur</th>
+                                            <tr id="timeline-header">
                                             </tr>
                                         </thead>
                                         <tbody></tbody>
@@ -195,25 +235,110 @@
                                         </li>
                                     </ul>
                                 </nav>
-                                <!-- Conteneur pour les filtres -->
-                                <div id="exchange-filters"></div>
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
 
-                    <!-- Vue brute (JSON parsé) -->
-                    <div class="accordion-item">
-                        <h2 class="accordion-header" id="heading-raw-view">
-                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" 
-                                    data-bs-target="#collapse-raw-view" aria-expanded="false" aria-controls="collapse-raw-view">
-                                <i class="fas fa-code me-2"></i> <strong>Vue brute (lisible)</strong>
-                            </button>
-                        </h2>
-                        <div id="collapse-raw-view" class="accordion-collapse collapse" 
-                             aria-labelledby="heading-raw-view" data-bs-parent="#exchange-accordion">
-                            <div class="accordion-body">
-                                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; max-height: 600px; overflow-y: auto;">
-                                    <pre id="exchange-raw-view" style="margin: 0; font-size: 12px; white-space: pre-wrap; word-break: break-word; font-family: 'Courier New', monospace;"></pre>
+            <!-- Patterns et Répétitions Section -->
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="card">
+                        <div class="card-header bg-warning text-dark">
+                            <h5 class="mb-0">
+                                <i class="fas fa-layer-group me-2"></i> <strong>Patterns et Répétitions</strong>
+                                <span class="badge bg-dark ms-2" id="badge-patterns">0</span>
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <ul class="nav nav-tabs mb-3" id="patternTabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="user-ip-tab" data-bs-toggle="tab" data-bs-target="#user-ip-content" type="button">
+                                        <i class="fas fa-user-tie me-1"></i>Utilisateur + IP
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="user-op-tab" data-bs-toggle="tab" data-bs-target="#user-op-content" type="button">
+                                        <i class="fas fa-tasks me-1"></i>Utilisateur + Opération
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="op-ip-tab" data-bs-toggle="tab" data-bs-target="#op-ip-content" type="button">
+                                        <i class="fas fa-network-wired me-1"></i>Opération + IP
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="user-op-ip-tab" data-bs-toggle="tab" data-bs-target="#user-op-ip-content" type="button">
+                                        <i class="fas fa-cube me-1"></i>Combinaison complète
+                                    </button>
+                                </li>
+                            </ul>
+
+                            <div class="tab-content">
+                                <!-- User + IP Tab -->
+                                <div class="tab-pane fade show active" id="user-ip-content" role="tabpanel">
+                                    <div style="max-height: 400px; overflow-y: auto;">
+                                        <table class="table table-sm table-hover mb-0" id="pattern-user-ip">
+                                            <thead class="table-light sticky-top">
+                                                <tr>
+                                                    <th>Utilisateur</th>
+                                                    <th>Adresse IP</th>
+                                                    <th class="text-end">Occurrences</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                <!-- User + Operation Tab -->
+                                <div class="tab-pane fade" id="user-op-content" role="tabpanel">
+                                    <div style="max-height: 400px; overflow-y: auto;">
+                                        <table class="table table-sm table-hover mb-0" id="pattern-user-op">
+                                            <thead class="table-light sticky-top">
+                                                <tr>
+                                                    <th>Utilisateur</th>
+                                                    <th>Opération</th>
+                                                    <th class="text-end">Occurrences</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                <!-- Operation + IP Tab -->
+                                <div class="tab-pane fade" id="op-ip-content" role="tabpanel">
+                                    <div style="max-height: 400px; overflow-y: auto;">
+                                        <table class="table table-sm table-hover mb-0" id="pattern-op-ip">
+                                            <thead class="table-light sticky-top">
+                                                <tr>
+                                                    <th>Opération</th>
+                                                    <th>Adresse IP</th>
+                                                    <th class="text-end">Occurrences</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                <!-- Full Combination Tab -->
+                                <div class="tab-pane fade" id="user-op-ip-content" role="tabpanel">
+                                    <div style="max-height: 400px; overflow-y: auto;">
+                                        <table class="table table-sm table-hover mb-0" id="pattern-user-op-ip">
+                                            <thead class="table-light sticky-top">
+                                                <tr>
+                                                    <th>Utilisateur</th>
+                                                    <th>Opération</th>
+                                                    <th>Adresse IP</th>
+                                                    <th class="text-end">Occurrences</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -225,6 +350,9 @@
             <div class="row mt-4">
                 <div class="col-12">
                     <div class="d-grid gap-2 d-sm-flex justify-content-sm-end">
+                        <button type="button" class="btn btn-primary" id="add-file-btn" data-bs-toggle="modal" data-bs-target="#addFileModal">
+                            <i class="fas fa-plus"></i> Ajouter un fichier supplémentaire
+                        </button>
                         <button type="button" class="btn btn-secondary" id="reset-btn">
                             <i class="fas fa-redo"></i> Nouvelle analyse
                         </button>
@@ -338,6 +466,42 @@
 
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Ajouter Fichier Supplémentaire -->
+    <div class="modal fade" id="addFileModal" tabindex="-1" aria-labelledby="addFileLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="addFileLabel">
+                        <i class="fas fa-file-upload me-2"></i>Ajouter un fichier supplémentaire
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-muted small mb-3">Les données du nouveau fichier seront <strong>fusionnées</strong> avec les données existantes.</p>
+                    <form id="add-file-form">
+                        <div class="mb-3">
+                            <label for="additional-csv-file" class="form-label">
+                                <i class="fas fa-file-csv text-success"></i> Fichier CSV supplémentaire
+                            </label>
+                            <input type="file" class="form-control" id="additional-csv-file" name="file" accept=".csv" required>
+
+                        </div>
+                        <div id="add-file-error" class="alert alert-danger" style="display:none;" role="alert">
+                            <i class="fas fa-exclamation-circle"></i> <span id="add-file-error-message"></span>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Annuler</button>
+                    <button type="button" class="btn btn-primary" id="add-file-submit-btn">
+                        <i class="fas fa-spinner fa-spin" id="add-file-spinner" style="display:none;"></i>
+                        <span id="add-file-text">Ajouter les données</span>
+                    </button>
                 </div>
             </div>
         </div>
