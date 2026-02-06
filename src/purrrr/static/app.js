@@ -144,9 +144,13 @@ function getColumnValue(op, colKey) {
 }
 
 function getFiltersFromUI() {
+    // Get multi-select values as arrays
+    const userValues = Array.from(document.getElementById('filter-user')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
+    const actionValues = Array.from(document.getElementById('filter-actions')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
+    
     return {
-        user: document.getElementById('filter-user')?.value || '',
-        actions: document.getElementById('filter-actions')?.value || '',
+        user: userValues,
+        actions: actionValues,
         files: document.getElementById('filter-files')?.value || '',
         ips: document.getElementById('filter-ips')?.value || '',
         exclude_ips: document.getElementById('exclude-ips')?.value || '',
@@ -206,9 +210,11 @@ function filterIpsList(clientIp, ipFilterString) {
 
 function applyFilters() {
     // Apply timeline filters with the selected values
-    const filterWorkload = document.getElementById('filter-workload')?.value || '';
-    const filterUser = document.getElementById('filter-user')?.value || '';
-    const filterActions = document.getElementById('filter-actions')?.value || '';
+    // Get multi-select values as arrays (Select2 compatible)
+    const filterWorkloadValues = Array.from(document.getElementById('filter-workload')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
+    const filterUserValues = Array.from(document.getElementById('filter-user')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
+    const filterActionsValues = Array.from(document.getElementById('filter-actions')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
+    
     const filterFiles = document.getElementById('filter-files')?.value || '';
     const filterIps = document.getElementById('filter-ips')?.value || '';
     const excludeIps = document.getElementById('exclude-ips')?.value || '';
@@ -220,18 +226,18 @@ function applyFilters() {
     if (!originalOps || originalOps.length === 0) return;
     
     let filtered = originalOps.filter(op => {
-        // Filtre workload
-        if (filterWorkload && op.Workload?.toLowerCase() !== filterWorkload.toLowerCase()) {
+        // Filtre workload - match any selected value
+        if (filterWorkloadValues.length > 0 && !filterWorkloadValues.some(val => op.Workload?.toLowerCase() === val.toLowerCase())) {
             return false;
         }
         
-        // Filtre utilisateur (dropdown value)
-        if (filterUser && op.user?.toLowerCase() !== filterUser.toLowerCase()) {
+        // Filtre utilisateur - match any selected value
+        if (filterUserValues.length > 0 && !filterUserValues.some(val => op.user?.toLowerCase() === val.toLowerCase())) {
             return false;
         }
         
-        // Filtre opération (dropdown value)
-        if (filterActions && op.operation?.toLowerCase() !== filterActions.toLowerCase()) {
+        // Filtre opération - match any selected value
+        if (filterActionsValues.length > 0 && !filterActionsValues.some(val => op.operation?.toLowerCase() === val.toLowerCase())) {
             return false;
         }
         
@@ -304,8 +310,17 @@ function applyFilters() {
 }
 
 function resetFilters() {
-    document.getElementById('filter-user').value = '';
-    document.getElementById('filter-actions').value = '';
+    // Reset multi-select dropdowns
+    document.getElementById('filter-workload').value = null;
+    $('#filter-workload').val(null).trigger('change');
+    
+    document.getElementById('filter-user').value = null;
+    $('#filter-user').val(null).trigger('change');
+    
+    document.getElementById('filter-actions').value = null;
+    $('#filter-actions').val(null).trigger('change');
+    
+    // Reset other filters
     document.getElementById('filter-files').value = '';
     document.getElementById('filter-ips').value = '';
     document.getElementById('exclude-ips').value = '';
@@ -1752,14 +1767,41 @@ function updateTimelinePage(pageNumber) {
     window.timelineCurrentPage = pageNumber;
     
     // Update button states
+    const firstBtn = document.querySelector('a[data-timeline-direction="first"]');
+    const prev10Btn = document.querySelector('a[data-timeline-direction="prev-10"]');
+    const prev5Btn = document.querySelector('a[data-timeline-direction="prev-5"]');
     const prevBtn = document.querySelector('a[data-timeline-direction="prev"]');
     const nextBtn = document.querySelector('a[data-timeline-direction="next"]');
+    const next5Btn = document.querySelector('a[data-timeline-direction="next-5"]');
+    const next10Btn = document.querySelector('a[data-timeline-direction="next-10"]');
+    const lastBtn = document.querySelector('a[data-timeline-direction="last"]');
     
+    // Disable "first" and "prev" buttons at page 1
+    if (firstBtn) {
+        firstBtn.parentElement.classList.toggle('disabled', pageNumber === 1);
+    }
+    if (prev10Btn) {
+        prev10Btn.parentElement.classList.toggle('disabled', pageNumber === 1);
+    }
+    if (prev5Btn) {
+        prev5Btn.parentElement.classList.toggle('disabled', pageNumber === 1);
+    }
     if (prevBtn) {
         prevBtn.parentElement.classList.toggle('disabled', pageNumber === 1);
     }
+    
+    // Disable "next", "next-5", "next-10", and "last" buttons at last page
     if (nextBtn) {
         nextBtn.parentElement.classList.toggle('disabled', pageNumber === window.timelineTotalPages);
+    }
+    if (next5Btn) {
+        next5Btn.parentElement.classList.toggle('disabled', pageNumber === window.timelineTotalPages);
+    }
+    if (next10Btn) {
+        next10Btn.parentElement.classList.toggle('disabled', pageNumber === window.timelineTotalPages);
+    }
+    if (lastBtn) {
+        lastBtn.parentElement.classList.toggle('disabled', pageNumber === window.timelineTotalPages);
     }
 }
 
@@ -1770,10 +1812,31 @@ function changeTimelinePage(event, direction) {
     const totalPages = window.timelineTotalPages || 1;
     let newPage = currentPage;
     
-    if (direction === 'next' && currentPage < totalPages) {
-        newPage = currentPage + 1;
-    } else if (direction === 'prev' && currentPage > 1) {
-        newPage = currentPage - 1;
+    switch(direction) {
+        case 'first':
+            newPage = 1;
+            break;
+        case 'prev-10':
+            newPage = Math.max(1, currentPage - 10);
+            break;
+        case 'prev-5':
+            newPage = Math.max(1, currentPage - 5);
+            break;
+        case 'prev':
+            newPage = Math.max(1, currentPage - 1);
+            break;
+        case 'next':
+            newPage = Math.min(totalPages, currentPage + 1);
+            break;
+        case 'next-5':
+            newPage = Math.min(totalPages, currentPage + 5);
+            break;
+        case 'next-10':
+            newPage = Math.min(totalPages, currentPage + 10);
+            break;
+        case 'last':
+            newPage = totalPages;
+            break;
     }
     
     if (newPage !== currentPage) {
