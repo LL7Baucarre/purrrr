@@ -41,6 +41,7 @@ services:
       - SECRET_KEY=your-super-secret-key-change-in-production
     volumes:
       - ./logs:/app/logs
+      - ./ip-to-country.csv:/app/ip-to-country.csv
       - purrrr_temp:/tmp/purrrr
     depends_on:
       redis:

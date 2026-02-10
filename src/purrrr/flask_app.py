@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import secrets
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
-from flask import Flask, render_template, request, session
+from flask import Flask, render_template, request, session, Response
 from polykit import PolyLog
 from werkzeug.utils import secure_filename
 
@@ -22,12 +24,22 @@ except ImportError:
     REDIS_AVAILABLE = False
 
 from purrrr.tools import AuditConfig
+from purrrr.geolocation import lookup_ip, get_ip_display, get_geolocation_db, get_asn_db, are_databases_ready
 
 if TYPE_CHECKING:
     from pandas import DataFrame
 
 # Initialize logger
 logger = PolyLog.get_logger(simple=True)
+
+# Global progress tracker
+progress_tracker = {}
+
+# Global results store (filled by background threads)
+analysis_results = {}
+
+# Thread pool for background analysis
+executor = ThreadPoolExecutor(max_workers=4)
 
 # Get the directory of this file
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -105,6 +117,12 @@ class AnalysisSession:
 # Global session storage (in production, use proper session management)
 sessions: dict[str, AnalysisSession] = {}
 
+# Pre-load databases at startup
+logger.info("Pre-loading geolocation and ASN databases...")
+get_geolocation_db()
+get_asn_db()
+logger.info("Databases loaded successfully")
+
 
 @app.route("/")
 def index() -> str:
@@ -153,23 +171,6 @@ def upload_file() -> tuple[dict[str, Any], int] | dict[str, Any]:
 
         # Detect log type
         log_type = detect_log_type(df)
-
-        # Pré-calculer l'analyse Exchange et la stocker dans Redis
-        try:
-            exchange_results = analyze_exchange(session_obj, {})
-            
-            # Stocker dans Redis si disponible
-            if REDIS_AVAILABLE and app.config.get("SESSION_REDIS"):
-                redis_client = app.config["SESSION_REDIS"]
-                redis_key = f"exchange_analysis:{session_id}"
-                redis_client.setex(
-                    redis_key,
-                    timedelta(hours=24),
-                    json.dumps(exchange_results, default=str)
-                )
-                logger.info(f"Exchange analysis cached in Redis: {redis_key}")
-        except Exception as e:
-            logger.warning(f"Failed to pre-compute Exchange analysis: {e}")
 
         return {
             "session_id": session_id,
@@ -239,6 +240,47 @@ def upload_additional_file(session_id: str) -> tuple[dict[str, Any], int] | dict
         return {"error": str(e)}, 500
 
 
+@app.route("/api/geoip/download", methods=["POST"])
+def download_geoip_database() -> dict[str, Any]:
+    """Download or update the GeoIP database."""
+    try:
+        from purrrr.geolocation import get_geolocation_db
+        db = get_geolocation_db()
+        db.load_database()  # Force reload/download
+        
+        return {
+            "status": "success",
+            "message": "Database downloaded successfully",
+            "loaded_ranges": len(db.ip_ranges)
+        }
+    except Exception as e:
+        logger.error(f"GeoIP database download error: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
+@app.route("/api/geoip/status", methods=["GET"])
+def geoip_status() -> dict[str, Any]:
+    """Get GeoIP and ASN database status."""
+    try:
+        geo_db = get_geolocation_db()
+        asn_db = get_asn_db()
+        
+        return {
+            "geoip": {
+                "loaded": geo_db.loaded,
+                "ranges_count": len(geo_db.ip_ranges),
+                "cache_size": len(geo_db.cache)
+            },
+            "asn": {
+                "loaded": asn_db.loaded,
+                "ranges_count": len(asn_db.ip_ranges),
+                "cache_size": len(asn_db.cache)
+            },
+            "all_ready": are_databases_ready()
+        }
+    except Exception as e:
+        logger.error(f"Database status error: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
 @app.route("/api/analysis/<session_id>/<analysis_type>", methods=["POST"])
 def analyze(session_id: str, analysis_type: str) -> tuple[dict[str, Any], int] | dict[str, Any]:
     """Perform analysis on uploaded data."""
@@ -269,17 +311,128 @@ def analyze(session_id: str, analysis_type: str) -> tuple[dict[str, Any], int] |
         elif analysis_type == "user_activity":
             results = analyze_user_activity(session_obj, params)
         elif analysis_type == "exchange":
-            results = analyze_exchange(session_obj, params)
+            # Pour Exchange, l'analyse se fait de manière synchrone mais avec progress tracking
+            logger.info(f"🚀 Starting Exchange analysis for session: {session_id}")
+            results = analyze_exchange(session_obj, params, session_id)
         elif analysis_type == "summary":
             results = analyze_summary(session_obj)
         else:
             return {"error": f"Unknown analysis type: {analysis_type}"}, 400
 
+        # Ensure we always return a dict
+        if not isinstance(results, dict):
+            results = {"error": "Invalid analysis result"}
+        
         return results
 
     except Exception as e:
         logger.error(f"Analysis error: {e}")
         return {"error": str(e)}, 500
+
+@app.route("/api/analysis/start/<session_id>", methods=["POST"])
+def start_analysis(session_id: str) -> tuple[dict[str, Any], int] | dict[str, Any]:
+    """Start analysis in a background thread. Returns immediately."""
+    try:
+        if session_id not in sessions:
+            return {"error": "Session not found"}, 404
+
+        session_obj = sessions[session_id]
+        params = request.get_json() or {}
+        analysis_type = params.get("analysis_type", "exchange")
+
+        # Check if already running
+        if session_id in progress_tracker and not progress_tracker[session_id].get("complete", True):
+            return {"status": "already_running", "session_id": session_id}
+
+        # Check Redis cache first
+        if analysis_type == "exchange" and REDIS_AVAILABLE and app.config.get("SESSION_REDIS"):
+            try:
+                redis_client = app.config["SESSION_REDIS"]
+                redis_key = f"exchange_analysis:{session_id}"
+                cached_result = redis_client.get(redis_key)
+                if cached_result:
+                    logger.info(f"Cache hit for {redis_key}")
+                    analysis_results[session_id] = json.loads(cached_result)
+                    progress_tracker[session_id] = {
+                        "current": 1, "total": 1, "percent": 100,
+                        "message": "Chargé depuis le cache", "complete": True
+                    }
+                    return {"status": "started", "session_id": session_id, "cached": True}
+            except Exception as e:
+                logger.warning(f"Redis cache error: {e}")
+
+        # Initialize progress
+        progress_tracker[session_id] = {
+            "current": 0, "total": 0, "percent": 0,
+            "message": "Démarrage de l'analyse...", "complete": False
+        }
+
+        # Launch in background thread
+        def run_analysis():
+            try:
+                logger.info(f"🚀 Background analysis started for {session_id}")
+                if analysis_type == "exchange":
+                    result = analyze_exchange(session_obj, params, session_id)
+                elif analysis_type == "file_operations":
+                    result = analyze_file_operations(session_obj, params)
+                elif analysis_type == "user_activity":
+                    result = analyze_user_activity(session_obj, params)
+                elif analysis_type == "summary":
+                    result = analyze_summary(session_obj)
+                else:
+                    result = {"error": f"Unknown type: {analysis_type}"}
+
+                analysis_results[session_id] = result
+                logger.info(f"✅ Background analysis completed for {session_id}")
+
+                # Cache in Redis
+                if analysis_type == "exchange" and REDIS_AVAILABLE and app.config.get("SESSION_REDIS"):
+                    try:
+                        redis_client = app.config["SESSION_REDIS"]
+                        redis_key = f"exchange_analysis:{session_id}"
+                        redis_client.setex(redis_key, timedelta(hours=24), json.dumps(result, default=str))
+                    except Exception as e:
+                        logger.warning(f"Redis cache store error: {e}")
+
+            except Exception as e:
+                logger.error(f"Background analysis error: {e}", exc_info=True)
+                analysis_results[session_id] = {"error": str(e)}
+                progress_tracker[session_id] = {
+                    "current": 0, "total": 0, "percent": 0,
+                    "message": f"Erreur: {e}", "complete": True, "error": True
+                }
+
+        executor.submit(run_analysis)
+        logger.info(f"📨 Analysis submitted to thread pool for {session_id}")
+
+        return {"status": "started", "session_id": session_id}
+
+    except Exception as e:
+        logger.error(f"Start analysis error: {e}")
+        return {"error": str(e)}, 500
+
+
+@app.route("/api/analysis/progress/<session_id>", methods=["GET"])
+def get_analysis_progress(session_id: str) -> dict[str, Any]:
+    """Get current analysis progress. Called by frontend polling."""
+    if session_id in progress_tracker:
+        return progress_tracker[session_id]
+    return {
+        "current": 0, "total": 0, "percent": 0,
+        "message": "En attente...", "complete": False
+    }
+
+
+@app.route("/api/analysis/result/<session_id>", methods=["GET"])
+def get_analysis_result(session_id: str) -> tuple[dict[str, Any], int] | dict[str, Any]:
+    """Get the result of a completed analysis."""
+    if session_id in analysis_results:
+        result = analysis_results.pop(session_id)  # Get and remove
+        # Clean up progress tracker
+        progress_tracker.pop(session_id, None)
+        return result
+    return {"error": "No result available yet"}, 202
+
 
 def detect_log_type(df: DataFrame) -> str:
     """Detect the type of log file based on columns."""
@@ -373,6 +526,24 @@ def filter_detailed_operations(detailed_ops: list[dict[str, Any]], params: dict[
         filtered_ops = [op for op in filtered_ops 
                        if not (op.get("full_data") and 
                               pattern.search(op["full_data"].get("ClientIPAddress", "")))]
+    
+    # Country filter
+    if params.get("country"):
+        country_filter = params["country"]
+        # Can be a list or single value
+        if isinstance(country_filter, str):
+            country_filter = [country_filter]
+        filtered_ops = [op for op in filtered_ops 
+                       if op.get("geo_country") in country_filter or op.get("geo_country_code") in country_filter]
+    
+    # ASN filter
+    if params.get("asn"):
+        asn_filter = params["asn"]
+        # Can be a list or single value
+        if isinstance(asn_filter, str):
+            asn_filter = [asn_filter]
+        filtered_ops = [op for op in filtered_ops 
+                       if op.get("asn") in asn_filter]
     
     # Date range filter
     if params.get("start_date") and params.get("end_date"):
@@ -499,42 +670,313 @@ def analyze_user_activity(session: AnalysisSession, params: dict[str, Any]) -> d
         "user_activity_timeline": user_activity_timeline,
     }
 
-def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[str, Any]:
-    """Analyze exchange activity with detailed breakdown."""
-    df = session.df.copy()
+
+def _add_geolocation_to_operation(op_dict: dict[str, Any]) -> dict[str, Any]:
+    """Add geolocation and ASN information to an operation dict."""
+    # Initialize with empty values
+    op_dict.setdefault("geo_country", "")
+    op_dict.setdefault("geo_country_code", "")
+    op_dict.setdefault("geo_continent", "")
+    op_dict.setdefault("asn", "")
+    op_dict.setdefault("as_name", "")
+    op_dict.setdefault("as_domain", "")
     
-    # Apply filters
-    df = apply_filters(df, params)
+    if op_dict.get("ClientIP"):
+        # Get GeoIP data
+        geo_data = lookup_ip(op_dict["ClientIP"])
+        if geo_data:
+            op_dict["geo_country"] = geo_data.get("country_name", "")
+            op_dict["geo_country_code"] = geo_data.get("country_code", "")
+            op_dict["geo_continent"] = geo_data.get("continent_code", "")
+            # Also add to full_data if it exists
+            if op_dict.get("full_data"):
+                op_dict["full_data"]["_geo_country"] = geo_data.get("country_name", "")
+                op_dict["full_data"]["_geo_country_code"] = geo_data.get("country_code", "")
+                op_dict["full_data"]["_geo_continent"] = geo_data.get("continent_code", "")
+        
+        # Get ASN data
+        from purrrr.geolocation import lookup_asn
+        asn_data = lookup_asn(op_dict["ClientIP"])
+        if asn_data:
+            op_dict["asn"] = asn_data.get("asn", "")
+            op_dict["as_name"] = asn_data.get("as_name", "")
+            op_dict["as_domain"] = asn_data.get("as_domain", "")
+            # Also add to full_data if it exists
+            if op_dict.get("full_data"):
+                op_dict["full_data"]["_asn"] = asn_data.get("asn", "")
+                op_dict["full_data"]["_as_name"] = asn_data.get("as_name", "")
+                op_dict["full_data"]["_as_domain"] = asn_data.get("as_domain", "")
+    
+    return op_dict
 
-    exchange_stats = {
-        "total_operations": len(df),
-        "unique_mailboxes": 0,
-        "operations_by_type": {},
-        "operations_by_user": {},
-        "detailed_operations": [],
-        "operation_details": {},
-    }
 
-    # Extract user info from AuditData JSON if needed
-    users_by_operation = {}
-    unique_mailboxes = set()
-    operation_details_by_type: dict[str, list[dict[str, Any]]] = {}
+def analyze_exchange(session: AnalysisSession, params: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
+    """Analyze exchange activity with detailed breakdown.
+    
+    Optimizations:
+    - Pre-caches all unique IPs before processing (avoids redundant lookups)
+    - Uses bisect-indexed geo/ASN databases (O(log n) instead of O(n))
+    - Processes rows via DataFrame column access (faster than iterrows)
+    - Parallel chunk processing via ThreadPoolExecutor
+    """
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed
+    
+    try:
+        df = session.df.copy()
+        
+        # Apply filters
+        df = apply_filters(df, params)
+        
+        total_rows = len(df)
+        t0 = _time.perf_counter()
+        print(f"\n📊 [ANALYSE EXCHANGE] Début du traitement: {total_rows} opérations à traiter")
+        
+        # Initialize progress tracker
+        if session_id:
+            progress_tracker[session_id] = {
+                "current": 0,
+                "total": total_rows,
+                "percent": 0,
+                "message": "Pré-chargement des adresses IP...",
+                "complete": False
+            }
 
-    for _, row in df.iterrows():
+        # ── Phase 1: Pre-cache all unique IPs ──────────────────────────────
+        unique_ips: set[str] = set()
+        has_audit_data = "AuditData" in df.columns
+        
+        # Fast IP extraction: gather all unique IPs from columns first
+        for col in ["ClientIP", "ClientIPAddress", "client_ip", "SenderIp"]:
+            if col in df.columns:
+                unique_ips.update(df[col].dropna().unique())
+        
+        # Extract IPs from AuditData JSON (fast scan)
+        if has_audit_data:
+            for raw in df["AuditData"].dropna():
+                try:
+                    ad = json.loads(raw)
+                    for k in ("ClientIP", "ClientIPAddress", "client_ip", "SenderIp"):
+                        v = ad.get(k)
+                        if v:
+                            unique_ips.add(str(v))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        
+        # Discard empty strings
+        unique_ips.discard("")
+        
+        from purrrr.geolocation import precache_ips
+        precache_ips(unique_ips)
+        
+        if session_id:
+            progress_tracker[session_id]["message"] = "Traitement des opérations..."
+        
+        # ── Phase 2: Split into chunks and process in parallel ─────────────
+        NUM_WORKERS = 4
+        chunk_size = max(500, total_rows // NUM_WORKERS)
+        df_reset = df.reset_index(drop=True)
+        columns_set = set(df.columns)
+        
+        chunks = []
+        for i in range(0, total_rows, chunk_size):
+            chunk_df = df_reset.iloc[i:i + chunk_size]
+            chunks.append((i, i, chunk_df, columns_set))
+        
+        print(f"  🔀 Traitement parallèle: {len(chunks)} chunks de ~{chunk_size} lignes avec {NUM_WORKERS} workers")
+        
+        # Shared progress counter updated by workers every N rows
+        import threading
+        _progress_lock = threading.Lock()
+        _progress_count = [0]
+        
+        def _update_progress(rows_done: int):
+            """Thread-safe progress update called from within chunk processing."""
+            with _progress_lock:
+                _progress_count[0] += rows_done
+                if session_id:
+                    done = min(_progress_count[0], total_rows)
+                    pct = done / total_rows * 100
+                    progress_tracker[session_id] = {
+                        "current": done,
+                        "total": total_rows,
+                        "percent": round(pct, 1),
+                        "message": f"Traitement: {done}/{total_rows} opérations",
+                        "complete": False
+                    }
+        
+        # Process chunks in parallel
+        all_chunk_results = []
+        with _TPE(max_workers=NUM_WORKERS) as pool:
+            futures = {
+                pool.submit(_process_exchange_chunk_fast, i, s, c, cols, _update_progress): (i, s)
+                for i, s, c, cols in chunks
+            }
+            for future in as_completed(futures):
+                all_chunk_results.extend(future.result())
+        
+        t_process = _time.perf_counter()
+        print(f"  ⚡ Traitement parallèle terminé en {t_process - t0:.2f}s")
+        
+        # ── Phase 3: Aggregate results ─────────────────────────────────────
+        if session_id:
+            progress_tracker[session_id]["message"] = "Agrégation des résultats..."
+
+        exchange_stats = {
+            "total_operations": total_rows,
+            "unique_mailboxes": 0,
+            "operations_by_type": {},
+            "operations_by_user": {},
+            "detailed_operations": [],
+            "operation_details": {},
+            "countries": [],
+            "unique_countries": 0,
+        }
+
+        users_by_operation: dict[str, dict[str, int]] = {}
+        unique_mailboxes: set[str] = set()
+        operation_details_by_type: dict[str, list[dict[str, Any]]] = {}
+        detailed_ops: list[dict[str, Any]] = []
+        
+        for item in all_chunk_results:
+            user = item.get("user")
+            operation = item.get("operation", "Unknown")
+            
+            if item.get("_is_timeline"):
+                detailed_ops.append(item)
+            
+            if user:
+                unique_mailboxes.add(user)
+                if operation not in users_by_operation:
+                    users_by_operation[operation] = {}
+                if user not in users_by_operation[operation]:
+                    users_by_operation[operation][user] = 0
+                users_by_operation[operation][user] += 1
+            
+            # Collect email details for accordion
+            email_details = item.get("_email_details")
+            if email_details:
+                if operation not in operation_details_by_type:
+                    operation_details_by_type[operation] = []
+                operation_details_by_type[operation].extend(email_details)
+
+        exchange_stats["unique_mailboxes"] = len(unique_mailboxes)
+
+        # Get operations by type (fast pandas value_counts)
+        if "Operation" in df.columns:
+            exchange_stats["operations_by_type"] = df["Operation"].value_counts().to_dict()
+
+        # Get operations by user with details
+        user_operations: dict[str, dict[str, int]] = {}
+        for operation, users_dict in users_by_operation.items():
+            for user, count in users_dict.items():
+                if user not in user_operations:
+                    user_operations[user] = {}
+                user_operations[user][operation] = count
+        
+        # Populate operations_by_user
+        for user, operations_dict in user_operations.items():
+            display_name = session.config.user_mapping.get(user, user)
+            exchange_stats["operations_by_user"][display_name] = {
+                "total": sum(operations_dict.values()),
+                "operations": operations_dict
+            }
+        
+        # Store operation details (max 100 per operation for performance)
+        for op_type, details_list in operation_details_by_type.items():
+            exchange_stats["operation_details"][op_type] = details_list[:100]
+
+        # Sort by timestamp (descending - most recent first)
+        detailed_ops.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        
+        # Apply detailed filters to operations timeline
+        detailed_ops = filter_detailed_operations(detailed_ops, params)
+        
+        # Clean internal keys from timeline ops before sending to frontend
+        for op in detailed_ops:
+            op.pop("_is_timeline", None)
+            op.pop("_email_details", None)
+        
+        exchange_stats["detailed_operations"] = detailed_ops
+        
+        # Analyze countries from geolocation data
+        countries_analysis = analyze_countries(detailed_ops)
+        exchange_stats["countries"] = countries_analysis.get("countries", [])
+        exchange_stats["unique_countries"] = countries_analysis.get("total_unique", 0)
+
+        t_total = _time.perf_counter()
+        print(f"✅ [ANALYSE EXCHANGE] Traitement terminé en {t_total - t0:.2f}s!")
+        print(f"   - {exchange_stats['total_operations']} opérations filtrées")
+        print(f"   - {exchange_stats['unique_countries']} pays uniques")
+        print(f"   - {len(exchange_stats['operations_by_type'])} types d'opérations")
+        
+        # Mark progress as complete
+        if session_id:
+            progress_tracker[session_id] = {
+                "current": total_rows,
+                "total": total_rows,
+                "percent": 100,
+                "message": f"Analyse terminée en {t_total - t0:.1f}s!",
+                "complete": True
+            }
+        
+        return exchange_stats
+    
+    except Exception as e:
+        logger.error(f"Error in analyze_exchange: {e}", exc_info=True)
+        if session_id:
+            progress_tracker[session_id] = {
+                "current": 0,
+                "total": 0,
+                "percent": 100,
+                "message": f"Erreur: {str(e)}",
+                "complete": True
+            }
+        return {
+            "total_operations": 0,
+            "unique_mailboxes": 0,
+            "operations_by_type": {},
+            "operations_by_user": {},
+            "detailed_operations": [],
+            "operation_details": {},
+            "countries": [],
+            "unique_countries": 0,
+            "error": str(e)
+        }
+
+
+def _process_exchange_chunk_fast(chunk_idx: int, start_idx: int, df_chunk, columns_set: set, progress_callback=None) -> list[dict[str, Any]]:
+    """Process a chunk of DataFrame rows for exchange analysis.
+    
+    Returns a list of dicts, each with:
+    - user, operation, _is_timeline (bool), _email_details (list or None)
+    - plus all timeline fields (timestamp, subject, folder, geo_*, asn, etc.)
+    """
+    results = []
+    has_audit_data = "AuditData" in columns_set
+    PROGRESS_INTERVAL = 200  # Report progress every N rows
+    rows_since_report = 0
+    
+    for _, row in df_chunk.iterrows():
+        rows_since_report += 1
+        if progress_callback and rows_since_report >= PROGRESS_INTERVAL:
+            progress_callback(rows_since_report)
+            rows_since_report = 0
         operation = row.get("Operation", "Unknown")
         
         # Try to get user info from different column sources
         user = None
-        if "MailboxOwnerUPN" in df.columns and pd.notna(row.get("MailboxOwnerUPN")):
+        if "MailboxOwnerUPN" in columns_set and pd.notna(row.get("MailboxOwnerUPN")):
             user = row.get("MailboxOwnerUPN")
-        elif "UserId" in df.columns and pd.notna(row.get("UserId")):
+        elif "UserId" in columns_set and pd.notna(row.get("UserId")):
             user = row.get("UserId")
         
         # Extract detailed info from AuditData JSON
         email_details_list: list[dict[str, Any]] = []
         timestamp = None
+        client_ip = ""
         
-        if "AuditData" in df.columns and pd.notna(row.get("AuditData")):
+        if has_audit_data and pd.notna(row.get("AuditData")):
             try:
                 audit_data = json.loads(row.get("AuditData", "{}"))
                 timestamp = audit_data.get("CreationTime", "")
@@ -546,29 +988,53 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
                     elif "UserId" in audit_data:
                         user = audit_data["UserId"]
                 
+                # Extract IP from various locations
+                client_ip = (row.get("ClientIP") or row.get("ClientIPAddress") or 
+                            row.get("client_ip") or row.get("SenderIp") or
+                            audit_data.get("ClientIP") or audit_data.get("ClientIPAddress") or 
+                            audit_data.get("client_ip") or audit_data.get("SenderIp") or "")
+                
                 # Special handling for MailItemsAccessed with Folders structure
                 if operation == "MailItemsAccessed" and "Folders" in audit_data and audit_data["Folders"]:
-                    # Extract items from Folders array - limit to max 3 items per operation for performance
                     item_count = 0
                     for folder_item in audit_data["Folders"]:
                         folder_path = folder_item.get("Path", "")
                         folder_items = folder_item.get("FolderItems", [])
-                        
                         for item in folder_items:
                             if item_count >= 3:
                                 break
-                            email_details = {
+                            email_details_list.append({
                                 "timestamp": timestamp,
                                 "subject": item.get("Subject", ""),
                                 "folder": folder_path,
                                 "size": item.get("SizeInBytes", 0),
-                            }
-                            email_details_list.append(email_details)
+                            })
                             item_count += 1
                         if item_count >= 3:
                             break
-                # Special handling for New-InboxRule and Set-InboxRule - extract from Parameters
-                elif operation in ["New-InboxRule", "Set-InboxRule"] and "Parameters" in audit_data:
+                    
+                    if user and audit_data["Folders"]:
+                        folder = audit_data["Folders"][0]
+                        fi = folder.get("FolderItems", [])
+                        if fi:
+                            op_dict = {
+                                "timestamp": timestamp,
+                                "operation": operation,
+                                "subject": fi[0].get("Subject", ""),
+                                "folder": folder.get("Path", ""),
+                                "user": user,
+                                "Workload": audit_data.get("Workload", ""),
+                                "ClientIP": client_ip,
+                                "full_data": audit_data,
+                                "_is_timeline": True,
+                                "_email_details": email_details_list or None,
+                            }
+                            op_dict = _add_geolocation_to_operation(op_dict)
+                            results.append(op_dict)
+                            continue  # Already added user + email_details
+                
+                # Special handling for New-InboxRule and Set-InboxRule
+                elif operation in ("New-InboxRule", "Set-InboxRule") and "Parameters" in audit_data:
                     parameters = audit_data.get("Parameters", [])
                     param_dict = {}
                     if isinstance(parameters, list):
@@ -576,32 +1042,46 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
                             if isinstance(param, dict):
                                 param_dict[param.get("Name", "")] = param.get("Value", "")
                     
-                    # Extract relevant parameters
                     rule_name = param_dict.get("Name", "")
                     rule_from = param_dict.get("From", "")
                     rule_id = param_dict.get("Identity", "")
                     
                     if rule_name or rule_from:
-                        email_details = {
+                        email_details_list.append({
                             "timestamp": timestamp,
                             "subject": f"Rule: {rule_name}" if rule_name else "Inbox Rule Change",
                             "folder": f"From: {rule_from}" if rule_from else rule_id or "N/A",
                             "size": 0,
+                        })
+                    
+                    if user:
+                        op_dict = {
+                            "timestamp": timestamp,
+                            "operation": operation,
+                            "subject": f"Rule: {rule_name}" if rule_name else "Inbox Rule",
+                            "folder": f"From: {rule_from}" if rule_from else "",
+                            "user": user,
+                            "Workload": audit_data.get("Workload", ""),
+                            "ClientIP": client_ip,
+                            "full_data": audit_data,
+                            "_is_timeline": True,
+                            "_email_details": email_details_list or None,
                         }
-                        email_details_list.append(email_details)
+                        op_dict = _add_geolocation_to_operation(op_dict)
+                        results.append(op_dict)
+                        continue
+                
+                # Generic operation handling
                 else:
-                    # Original logic for other operations
                     subject = audit_data.get("Subject")
                     folder = ""
                     size = 0
                     
-                    # Try Item field first (for SendAs, Send, MailItemsAccessed when Item present)
                     if "Item" in audit_data:
                         item = audit_data["Item"]
                         subject = subject or item.get("Subject", "")
                         folder = item.get("ParentFolder", {}).get("Path", "")
                         size = item.get("SizeInBytes", 0)
-                    # Otherwise try AffectedItems (for HardDelete, SoftDelete, Move, etc.)
                     elif "AffectedItems" in audit_data and audit_data["AffectedItems"]:
                         affected_item = audit_data["AffectedItems"][0]
                         subject = subject or affected_item.get("Subject", "")
@@ -609,166 +1089,48 @@ def analyze_exchange(session: AnalysisSession, params: dict[str, Any]) -> dict[s
                         size = affected_item.get("SizeInBytes", 0)
                     
                     if subject or folder or size:
-                        email_details = {
+                        email_details_list.append({
                             "timestamp": timestamp,
                             "subject": subject or "",
                             "folder": folder,
                             "size": size,
-                        }
-                        email_details_list.append(email_details)
-                    
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        if user:
-            unique_mailboxes.add(user)
-            if operation not in users_by_operation:
-                users_by_operation[operation] = {}
-            if user not in users_by_operation[operation]:
-                users_by_operation[operation][user] = 0
-            users_by_operation[operation][user] += 1
-            
-            # Store operation details for display in accordion
-            if operation not in operation_details_by_type:
-                operation_details_by_type[operation] = []
-            
-            # Add all email details extracted
-            operation_details_by_type[operation].extend(email_details_list)
-
-    exchange_stats["unique_mailboxes"] = len(unique_mailboxes)
-
-    # Get operations by type
-    if "Operation" in df.columns:
-        exchange_stats["operations_by_type"] = df["Operation"].value_counts().to_dict()
-
-    # Get operations by user with details
-    user_operations: dict[str, dict[str, int]] = {}
-    for operation, users_dict in users_by_operation.items():
-        for user, count in users_dict.items():
-            if user not in user_operations:
-                user_operations[user] = {}
-            user_operations[user][operation] = count
-    
-    # Populate operations_by_user
-    for user, operations_dict in user_operations.items():
-        display_name = session.config.user_mapping.get(user, user)
-        exchange_stats["operations_by_user"][display_name] = {
-            "total": sum(operations_dict.values()),
-            "operations": operations_dict
-        }
-
-    # Store operation details (max 100 per operation for performance)
-    for op_type, details_list in operation_details_by_type.items():
-        exchange_stats["operation_details"][op_type] = details_list[:100]
-
-    # Build complete timeline of operations (chronological)
-    detailed_ops = []
-    for _, row in df.iterrows():
-        operation = row.get("Operation", "Unknown")
-        user = None
-        if "MailboxOwnerUPN" in df.columns and pd.notna(row.get("MailboxOwnerUPN")):
-            user = row.get("MailboxOwnerUPN")
-        elif "UserId" in df.columns and pd.notna(row.get("UserId")):
-            user = row.get("UserId")
-        
-        # Extract IP from the row directly (support multiple field names)
-        client_ip = (row.get("ClientIP") or row.get("ClientIPAddress") or 
-                     row.get("client_ip") or row.get("SenderIp") or "")
-        
-        if "AuditData" in df.columns and pd.notna(row.get("AuditData")):
-            try:
-                audit_data = json.loads(row.get("AuditData", "{}"))
-                timestamp = audit_data.get("CreationTime", "")
-                
-                # If IP not found in row columns, try to get from AuditData
-                if not client_ip:
-                    client_ip = (audit_data.get("ClientIP") or audit_data.get("ClientIPAddress") or 
-                                audit_data.get("client_ip") or audit_data.get("SenderIp") or "")
-                
-                # Special handling for MailItemsAccessed with Folders structure
-                if operation == "MailItemsAccessed" and "Folders" in audit_data and audit_data["Folders"]:
-                    # For timeline, limit to one representative item per operation
-                    for folder_item in audit_data["Folders"]:
-                        folder_path = folder_item.get("Path", "")
-                        folder_items = folder_item.get("FolderItems", [])
-                        
-                        if folder_items and user:
-                            # Only take the first item for timeline (performance)
-                            item = folder_items[0]
-                            detailed_ops.append({
-                                "timestamp": timestamp,
-                                "operation": operation,
-                                "subject": item.get("Subject", ""),
-                                "folder": folder_path,
-                                "user": user,
-                                "Workload": audit_data.get("Workload", ""),
-                                "ClientIP": client_ip,
-                                "full_data": audit_data  # Ajouter les données complètes
-                            })
-                            # Only one item per operation in timeline
-                            break
-                # Special handling for New-InboxRule and Set-InboxRule
-                elif operation in ["New-InboxRule", "Set-InboxRule"] and user:
-                    parameters = audit_data.get("Parameters", [])
-                    param_dict = {}
-                    if isinstance(parameters, list):
-                        for param in parameters:
-                            if isinstance(param, dict):
-                                param_dict[param.get("Name", "")] = param.get("Value", "")
-                    
-                    rule_name = param_dict.get("Name", "")
-                    rule_from = param_dict.get("From", "")
-                    
-                    subject = f"Rule: {rule_name}" if rule_name else "Inbox Rule"
-                    folder = f"From: {rule_from}" if rule_from else ""
-                    
-                    detailed_ops.append({
-                        "timestamp": timestamp,
-                        "operation": operation,
-                        "subject": subject,
-                        "folder": folder,
-                        "user": user,
-                        "Workload": audit_data.get("Workload", ""),
-                        "ClientIP": client_ip,
-                        "full_data": audit_data  # Ajouter les données complètes
-                    })
-                else:
-                    # Original logic for other operations
-                    subject = audit_data.get("Subject", "")
-                    folder = ""
-                    
-                    # Extract subject from Item or AffectedItems
-                    if "Item" in audit_data:
-                        subject = subject or audit_data["Item"].get("Subject", "")
-                        folder = audit_data["Item"].get("ParentFolder", {}).get("Path", "")
-                    elif "AffectedItems" in audit_data and audit_data["AffectedItems"]:
-                        subject = subject or audit_data["AffectedItems"][0].get("Subject", "")
-                        folder = audit_data["AffectedItems"][0].get("ParentFolder", {}).get("Path", "")
+                        })
                     
                     if user:
-                        detailed_ops.append({
+                        op_dict = {
                             "timestamp": timestamp,
                             "operation": operation,
-                            "subject": subject,
+                            "subject": subject or "",
                             "folder": folder,
                             "user": user,
                             "Workload": audit_data.get("Workload", ""),
                             "ClientIP": client_ip,
-                            "full_data": audit_data  # Ajouter les données complètes
-                        })
-                
+                            "full_data": audit_data,
+                            "_is_timeline": True,
+                            "_email_details": email_details_list or None,
+                        }
+                        op_dict = _add_geolocation_to_operation(op_dict)
+                        results.append(op_dict)
+                        continue
+                    
             except (json.JSONDecodeError, TypeError):
                 pass
+        
+        # If we haven't added via continue, still track user + operation
+        if user:
+            results.append({
+                "user": user,
+                "operation": operation,
+                "_is_timeline": False,
+                "_email_details": email_details_list or None,
+            })
     
-    # Sort by timestamp (descending - most recent first)
-    detailed_ops.sort(key=lambda x: x["timestamp"], reverse=True)
+    # Report remaining rows
+    if progress_callback and rows_since_report > 0:
+        progress_callback(rows_since_report)
     
-    # Apply detailed filters to operations timeline
-    detailed_ops = filter_detailed_operations(detailed_ops, params)
-    
-    exchange_stats["detailed_operations"] = detailed_ops
+    return results
 
-    return exchange_stats
 
 def analyze_summary(session: AnalysisSession) -> dict[str, Any]:
     """Get overall summary."""
@@ -790,6 +1152,40 @@ def analyze_summary(session: AnalysisSession) -> dict[str, Any]:
 
     return summary
 
+
+def analyze_countries(detailed_ops: list[dict[str, Any]]) -> dict[str, Any]:
+    """Analyze geolocation data from operations."""
+    countries_data = {}
+    
+    for op in detailed_ops:
+        country_code = op.get("geo_country_code", "")
+        country_name = op.get("geo_country", "Unknown")
+        continent = op.get("geo_continent", "")
+        
+        if country_code or country_name != "Unknown":
+            key = f"{country_code}|{country_name}|{continent}"
+            if key not in countries_data:
+                countries_data[key] = 0
+            countries_data[key] += 1
+    
+    # Convert to list and sort by count
+    countries_list = [
+        {
+            "country_code": k.split("|")[0] or "-",
+            "country_name": k.split("|")[1],
+            "continent": k.split("|")[2] or "-",
+            "count": v
+        }
+        for k, v in countries_data.items()
+    ]
+    countries_list.sort(key=lambda x: x["count"], reverse=True)
+    
+    return {
+        "countries": countries_list[:50],  # Top 50 countries
+        "total_unique": len(countries_list)
+    }
+
+
 def filter_by_date(df: DataFrame, start_date: str, end_date: str) -> DataFrame:
     """Filter dataframe by date range."""
     try:
@@ -802,10 +1198,12 @@ def filter_by_date(df: DataFrame, start_date: str, end_date: str) -> DataFrame:
         logger.error(f"Date filtering error: {e}")
     return df
 
+
 @app.errorhandler(413)
 def request_entity_too_large(error: Any) -> tuple[dict[str, str], int]:
     """Handle file too large error."""
     return {"error": "File is too large (max 500MB)"}, 413
+
 
 @app.errorhandler(404)
 def not_found(error: Any) -> tuple[dict[str, str], int]:
@@ -821,7 +1219,7 @@ def internal_error(error: Any) -> tuple[dict[str, str], int]:
 
 def run_flask_app(host: str = "0.0.0.0", port: int = 5000, debug: bool = False) -> None:
     """Run the Flask application."""
-    app.run(host=host, port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug, threaded=True)
 
 
 if __name__ == "__main__":

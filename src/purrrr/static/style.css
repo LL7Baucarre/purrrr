@@ -725,3 +725,103 @@ footer {
     border-radius: 0.25rem;
     font-family: 'Courier New', monospace;
 }
+
+/* Pinned logs styling */
+#exchange-timeline tbody tr:has(.pin-button-pinned) {
+    background-color: #ffd700 !important;
+    border-left: 5px solid #ff9800 !important;
+    border-bottom: 2px solid #ff9800 !important;
+    box-shadow: inset 0 0 8px rgba(255, 152, 0, 0.3);
+    font-weight: 500;
+}
+
+#exchange-timeline tbody tr:has(.pin-button-pinned):hover {
+    background-color: #ffed4e !important;
+    box-shadow: inset 0 0 12px rgba(255, 152, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.pin-button-pinned {
+    color: #ff6f00 !important;
+    font-weight: bold;
+    font-size: 1.1em;
+}
+
+/* Compact view mode */
+#exchange-timeline.compact-mode tbody tr {
+    font-size: 0.85rem;
+}
+
+#exchange-timeline.compact-mode tbody td {
+    padding: 0.3rem 0.5rem !important;
+    vertical-align: middle;
+}
+
+#exchange-timeline.compact-mode thead th {
+    padding: 0.4rem 0.5rem !important;
+    font-size: 0.85rem;
+}
+
+#exchange-timeline.compact-mode .btn-link {
+    padding: 0 !important;
+}
+
+#exchange-timeline.compact-mode small {
+    font-size: 0.75rem;
+}
+
+#exchange-timeline.compact-mode .badge {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.35rem !important;
+}
+
+/* Search highlighting */
+.search-match {
+    background-color: #fff3cd;
+    padding: 0.2rem 0.4rem;
+    border-radius: 0.25rem;
+}
+
+/* Dashboard Progress Container */
+#dashboard-progress-container {
+    animation: fadeIn 0.3s ease-in;
+}
+
+#dashboard-status-messages {
+    background: #f8f9fa;
+    border-left: 4px solid #007bff;
+    padding: 15px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+    font-size: 14px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+#dashboard-status-messages::-webkit-scrollbar {
+    width: 8px;
+}
+
+#dashboard-status-messages::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+#dashboard-status-messages::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+
+#dashboard-status-messages::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

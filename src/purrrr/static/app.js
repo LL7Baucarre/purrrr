@@ -5,6 +5,8 @@ let currentSessionId = null;
 let currentLogType = null;
 let analysisData = {};
 let currentFilters = {};
+let pinnedLogs = []; // Store pinned logs
+let compactViewEnabled = false; // Track compact view state
 
 // Column visibility configuration
 const AVAILABLE_COLUMNS = [
@@ -13,7 +15,11 @@ const AVAILABLE_COLUMNS = [
     { key: 'subject', label: 'Détails', visible: true, width: '25%' },
     { key: 'user', label: 'Utilisateur', visible: true, width: '20%' },
     { key: 'Workload', label: 'Workload', visible: false, width: '10%' },
-    { key: 'folder', label: 'Dossier', visible: false, width: '15%' }
+    { key: 'folder', label: 'Dossier', visible: false, width: '15%' },
+    { key: 'ClientIP', label: 'Adresse IP', visible: true, width: '12%' },
+    { key: 'geo_country_code', label: 'Pays', visible: true, width: '8%' },
+    { key: 'asn', label: 'ASN', visible: false, width: '10%' },
+    { key: 'as_name', label: 'Nom AS', visible: false, width: '15%' }
 ];
 
 // DOM Elements
@@ -29,7 +35,55 @@ const navbarStatus = document.getElementById('navbar-status');
 document.addEventListener('DOMContentLoaded', function () {
     setupEventListeners();
     initializeColumnSelectors();
+    initializeDatabaseLoading();
 });
+
+async function initializeDatabaseLoading() {
+    // Show loading modal and wait for databases to be ready
+    const modal = new bootstrap.Modal(document.getElementById('db-loading-modal'), {
+        backdrop: 'static',
+        keyboard: false
+    });
+    modal.show();
+    
+    // Poll for database status
+    let geoipReady = false;
+    let asnReady = false;
+    
+    const checkInterval = setInterval(async () => {
+        try {
+            const response = await fetch('/api/geoip/status');
+            const status = await response.json();
+            
+            // Update GeoIP status
+            if (status.geoip?.loaded && !geoipReady) {
+                geoipReady = true;
+                document.getElementById('geoip-loading-bar').style.width = '100%';
+                document.getElementById('geoip-loading-text').textContent = `✓ ${status.geoip.ranges_count.toLocaleString()} plages`;
+            } else if (status.geoip?.loaded) {
+                document.getElementById('geoip-loading-bar').style.width = '100%';
+            }
+            
+            // Update ASN status
+            if (status.asn?.loaded && !asnReady) {
+                asnReady = true;
+                document.getElementById('asn-loading-bar').style.width = '100%';
+                document.getElementById('asn-loading-text').textContent = `✓ ${status.asn.ranges_count.toLocaleString()} plages`;
+            } else if (status.asn?.loaded) {
+                document.getElementById('asn-loading-bar').style.width = '100%';
+            }
+            
+            // Check if all databases are ready
+            if (status.all_ready) {
+                clearInterval(checkInterval);
+                modal.hide();
+                checkGeoIPStatus();
+            }
+        } catch (error) {
+            console.error('Error checking database status:', error);
+        }
+    }, 500); // Check every 500ms
+}
 
 function setupEventListeners() {
     uploadForm.addEventListener('submit', handleFileUpload);
@@ -39,6 +93,12 @@ function setupEventListeners() {
     csvFileInput.addEventListener('change', function () {
         updateFileInputStatus('csv-check', this.value);
     });
+
+    // GeoIP download button
+    const downloadGeoIPBtn = document.getElementById('download-geoip-btn');
+    if (downloadGeoIPBtn) {
+        downloadGeoIPBtn.addEventListener('click', downloadGeoIPDatabase);
+    }
 
     // Items per page selector
     const itemsPerPageSelector = document.getElementById('items-per-page');
@@ -73,6 +133,55 @@ function setupEventListeners() {
             handleAddFile();
         });
         addFileSubmitBtn.addEventListener('click', handleAddFile);
+    }
+    
+    // Export and Pin buttons
+    const exportCsvBtn = document.getElementById('export-csv-filtered');
+    const exportJsonBtn = document.getElementById('export-json-full');
+    const showPinnedBtn = document.getElementById('show-pinned-btn');
+    const clearPinnedBtn = document.getElementById('clear-all-pinned');
+    
+    if (exportCsvBtn) {
+        exportCsvBtn.addEventListener('click', exportFilteredAsCSV);
+    }
+    if (exportJsonBtn) {
+        exportJsonBtn.addEventListener('click', exportFullAsJSON);
+    }
+    if (showPinnedBtn) {
+        showPinnedBtn.addEventListener('click', showPinnedLogs);
+    }
+    if (clearPinnedBtn) {
+        clearPinnedBtn.addEventListener('click', clearAllPinned);
+    }
+    
+    // Compact view toggle
+    const compactViewCheckbox = document.getElementById('compact-view');
+    if (compactViewCheckbox) {
+        compactViewCheckbox.addEventListener('change', toggleCompactView);
+    }
+    
+    // Initialize Select2 for country filter
+    const filterCountrySelect = document.getElementById('filter-country');
+    if (filterCountrySelect) {
+        $(filterCountrySelect).select2({
+            placeholder: "Sélectionner des pays",
+            allowClear: true,
+            width: '100%'
+        });
+        // Apply filters when country selection changes (select2 event)
+        $(filterCountrySelect).on('select2:select select2:unselect select2:clearing', applyFilters);
+    }
+    
+    // Initialize Select2 for ASN filter
+    const filterAsnSelect = document.getElementById('filter-asn');
+    if (filterAsnSelect) {
+        $(filterAsnSelect).select2({
+            placeholder: "Sélectionner des ASN",
+            allowClear: true,
+            width: '100%'
+        });
+        // Apply filters when ASN selection changes (select2 event)
+        $(filterAsnSelect).on('select2:select select2:unselect select2:clearing', applyFilters);
     }
 }
 
@@ -122,6 +231,13 @@ function renderTableHeader() {
         th.textContent = col.label;
         headerRow.appendChild(th);
     });
+    
+    // Add Actions column header
+    const thActions = document.createElement('th');
+    thActions.style.width = '5%';
+    thActions.textContent = 'Actions';
+    thActions.style.textAlign = 'center';
+    headerRow.appendChild(thActions);
 }
 
 function getColumnValue(op, colKey) {
@@ -138,6 +254,20 @@ function getColumnValue(op, colKey) {
             return `<small>${op.Workload || '-'}</small>`;
         case 'folder':
             return `<small class="text-muted" title="${op.folder || ''}">${op.folder || '-'}</small>`;
+        case 'ClientIP':
+            return `<small class="font-monospace">${op.ClientIP || '-'}</small>`;
+        case 'geo_country_code':
+            const country = op.geo_country_code || '-';
+            const countryName = op.geo_country || '';
+            const title = countryName ? `title="${countryName}"` : '';
+            return `<small ${title}><strong>${country}</strong></small>`;
+        case 'asn':
+            const asn = op.asn || '-';
+            return `<small class="font-monospace"><strong>${asn}</strong></small>`;
+        case 'as_name':
+            const asName = op.as_name || '-';
+            const asnValue = op.asn ? `title="ASN: ${op.asn}"` : '';
+            return `<small ${asnValue}>${asName}</small>`;
         default:
             return '-';
     }
@@ -214,12 +344,30 @@ function applyFilters() {
     const filterWorkloadValues = Array.from(document.getElementById('filter-workload')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
     const filterUserValues = Array.from(document.getElementById('filter-user')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
     const filterActionsValues = Array.from(document.getElementById('filter-actions')?.selectedOptions || []).map(opt => opt.value).filter(v => v);
+    const countryVal = $('#filter-country').val();
+    const filterCountryValues = Array.isArray(countryVal) ? countryVal : (countryVal ? [countryVal] : []);
+    const asnVal = $('#filter-asn').val();
+    const filterAsnValues = Array.isArray(asnVal) ? asnVal : (asnVal ? [asnVal] : []);
     
     const filterFiles = document.getElementById('filter-files')?.value || '';
     const filterIps = document.getElementById('filter-ips')?.value || '';
     const excludeIps = document.getElementById('exclude-ips')?.value || '';
+    const filterSessionId = document.getElementById('filter-session-id')?.value || '';
     const filterDateStart = document.getElementById('filter-date-start')?.value || '';
     const filterDateEnd = document.getElementById('filter-date-end')?.value || '';
+    
+    // Build filters object for server-side filtering
+    currentFilters = {};
+    if (filterUserValues.length > 0) currentFilters.user = filterUserValues.join(', ');
+    if (filterActionsValues.length > 0) currentFilters.actions = filterActionsValues.join(', ');
+    if (filterFiles) currentFilters.files = filterFiles;
+    if (filterIps) currentFilters.ips = filterIps;
+    if (excludeIps) currentFilters.exclude_ips = excludeIps;
+    if (filterCountryValues.length > 0) currentFilters.country = filterCountryValues;
+    if (filterAsnValues.length > 0) currentFilters.asn = filterAsnValues;
+    if (filterSessionId) currentFilters.session_id = filterSessionId;
+    if (filterDateStart) currentFilters.start_date = filterDateStart;
+    if (filterDateEnd) currentFilters.end_date = filterDateEnd;
     
     // Get the original operations (before any filtering)
     const originalOps = window.timelineOriginalOperations || window.timelineAllOperations || [];
@@ -259,6 +407,30 @@ function applyFilters() {
         if (excludeIps) {
             const clientIp = op.ClientIP || op.client_ip || op.ClientIPAddress || op.SenderIp || '';
             if (filterIpsList(clientIp, excludeIps)) {
+                return false;
+            }
+        }
+        
+        // Filtre pays - match any selected value
+        if (filterCountryValues.length > 0) {
+            const opCountry = op.geo_country || '';
+            if (!filterCountryValues.includes(opCountry)) {
+                return false;
+            }
+        }
+        
+        // Filtre ASN - match any selected value
+        if (filterAsnValues.length > 0) {
+            const opAsn = op.asn || '';
+            if (!filterAsnValues.includes(opAsn)) {
+                return false;
+            }
+        }
+        
+        // Filtre session ID
+        if (filterSessionId) {
+            const opSessionId = op.session_id || '';
+            if (!opSessionId.toLowerCase().includes(filterSessionId.toLowerCase())) {
                 return false;
             }
         }
@@ -324,6 +496,8 @@ function resetFilters() {
     document.getElementById('filter-files').value = '';
     document.getElementById('filter-ips').value = '';
     document.getElementById('exclude-ips').value = '';
+    $('#filter-country').val([]).trigger('change');
+    document.getElementById('filter-session-id').value = '';
     document.getElementById('filter-date-start').value = '';
     document.getElementById('filter-date-end').value = '';
     const sortDropdown = document.getElementById('filter-sort-by');
@@ -359,11 +533,12 @@ function updateFileInputStatus(elementId, value) {
 }
 
 function populateFilterDropdowns(operations) {
-    // Extract unique users, operations, and workloads from the operations data
-    // Deduplicate users case-insensitively
-    const userMap = new Map(); // Map with lowercase key -> original value
+    // Extract unique users, operations, workloads, and countries from the operations data
+    const userMap = new Map();
     const uniqueOperations = new Set();
     const uniqueWorkloads = new Set();
+    const uniqueCountries = new Map(); // Map with country_code -> country_name
+    const uniqueAsns = new Map(); // Map with asn -> as_name
     
     operations.forEach(op => {
         if (op.user) {
@@ -374,6 +549,13 @@ function populateFilterDropdowns(operations) {
         }
         if (op.operation) uniqueOperations.add(op.operation);
         if (op.Workload) uniqueWorkloads.add(op.Workload);
+        if (op.geo_country_code && op.geo_country) {
+            uniqueCountries.set(op.geo_country_code, op.geo_country);
+        }
+        if (op.asn) {
+            const asnDisplay = op.as_name || op.asn;
+            uniqueAsns.set(op.asn, asnDisplay);
+        }
     });
     
     // Sort and populate workload dropdown
@@ -417,6 +599,40 @@ function populateFilterDropdowns(operations) {
         });
         actionsSelect.value = currentValue;
     }
+    
+    // Sort and populate countries dropdown
+    const countrySelect = document.getElementById('filter-country');
+    if (countrySelect) {
+        const currentValue = countrySelect.value;
+        countrySelect.innerHTML = '<option value="">Tous les pays</option>';
+        Array.from(uniqueCountries.values()).sort().forEach(country => {
+            const option = document.createElement('option');
+            option.value = country;
+            option.textContent = country;
+            countrySelect.appendChild(option);
+        });
+        countrySelect.value = currentValue;
+        // Trigger Select2 to refresh the options list
+        $(countrySelect).trigger('change.select2');
+    }
+    
+    // Sort and populate ASN dropdown
+    const asnSelect = document.getElementById('filter-asn');
+    if (asnSelect) {
+        const currentValue = asnSelect.value;
+        asnSelect.innerHTML = '<option value="">Tous les ASN</option>';
+        Array.from(uniqueAsns.entries())
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .forEach(([asn, display]) => {
+                const option = document.createElement('option');
+                option.value = asn;
+                option.textContent = display;
+                asnSelect.appendChild(option);
+            });
+        asnSelect.value = currentValue;
+        // Trigger Select2 to refresh the options list
+        $(asnSelect).trigger('change.select2');
+    }
 }
 
 async function handleFileUpload(e) {
@@ -428,45 +644,44 @@ async function handleFileUpload(e) {
         return;
     }
 
-    // Show loading state
+    // Show loading state on upload button
     submitBtn.disabled = true;
     document.getElementById('upload-spinner').style.display = 'inline-block';
-    document.getElementById('submit-text').textContent = 'Traitement...';
+    document.getElementById('submit-text').textContent = 'Envoi en cours...';
     document.getElementById('upload-error').style.display = 'none';
 
     try {
+        // ── STEP 1: Upload file ──
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch('/api/upload', {
+        const uploadResponse = await fetch('/api/upload', {
             method: 'POST',
             body: formData
         });
 
-        if (!response.ok) {
-            const error = await response.json();
+        if (!uploadResponse.ok) {
+            const error = await uploadResponse.json();
             throw new Error(error.error || 'Erreur lors du téléchargement');
         }
 
-        const data = await response.json();
-        currentSessionId = data.session_id;
-        currentLogType = data.log_type;
+        const uploadData = await uploadResponse.json();
+        currentSessionId = uploadData.session_id;
+        currentLogType = uploadData.log_type;
 
-        // Show file info
-        document.getElementById('info-filename').textContent = data.filename;
-        document.getElementById('info-rows').textContent = data.rows.toLocaleString();
-        document.getElementById('info-columns').textContent = data.columns;
-        document.getElementById('file-info').style.display = 'block';
-
-        // Update navbar
-        navbarStatus.textContent = `Session: ${currentSessionId.substring(0, 8)}... | Type: ${data.log_type}`;
-
-        // Show dashboard
+        // ── STEP 2: Switch to dashboard immediately ──
         uploadSection.style.display = 'none';
         dashboardSection.style.display = 'block';
+        window.scrollTo(0, 0);
+        navbarStatus.textContent = `Session: ${currentSessionId.substring(0, 8)}... | Type: ${uploadData.log_type}`;
 
-        // Déclencher automatiquement l'analyse Exchange
-        await loadAnalysisData('exchange');
+        // ── STEP 3: Show progress UI ──
+        showAnalysisProgress(
+            `Fichier "${uploadData.filename}" chargé — ${uploadData.rows.toLocaleString()} lignes`
+        );
+
+        // ── STEP 4: Start background analysis ──
+        await launchAnalysisWithProgress(currentSessionId, 'exchange');
 
     } catch (error) {
         console.error('Upload error:', error);
@@ -476,6 +691,122 @@ async function handleFileUpload(e) {
         document.getElementById('upload-spinner').style.display = 'none';
         document.getElementById('submit-text').textContent = 'Analyser les données';
     }
+}
+
+// ─────────────────────────────────────────────
+//  Analysis progress system (clean rewrite)
+// ─────────────────────────────────────────────
+
+function showAnalysisProgress(initialMessage) {
+    const container = document.getElementById('dashboard-progress-container');
+    if (!container) return;
+    container.style.display = 'block';
+
+    // Status messages
+    const msgBox = document.getElementById('dashboard-status-messages');
+    if (msgBox) {
+        msgBox.innerHTML = '';
+        appendStatusMessage(msgBox, initialMessage);
+    }
+
+    // Progress bar
+    const barBox = document.getElementById('dashboard-progress-bar');
+    if (barBox) {
+        barBox.innerHTML = `
+            <div style="font-size:14px;margin-bottom:10px;font-weight:600;color:#0d6efd">
+                <i class="fas fa-spinner fa-spin"></i>
+                <span id="progress-label">Initialisation de l'analyse...</span>
+            </div>
+            <div style="width:100%;height:30px;background:#e9ecef;border-radius:15px;overflow:hidden;box-shadow:inset 0 1px 3px rgba(0,0,0,.1)">
+                <div id="progress-bar" style="height:100%;background:linear-gradient(90deg,#0d6efd,#0056b3);width:0%;transition:width .3s ease;display:flex;align-items:center;justify-content:center">
+                    <span id="progress-percent" style="color:#fff;font-weight:700;font-size:13px;text-shadow:0 1px 2px rgba(0,0,0,.2)">0%</span>
+                </div>
+            </div>
+        `;
+    }
+}
+
+function hideAnalysisProgress() {
+    const container = document.getElementById('dashboard-progress-container');
+    if (container) container.style.display = 'none';
+}
+
+function setProgress(percent, message) {
+    const bar = document.getElementById('progress-bar');
+    const pct = document.getElementById('progress-percent');
+    const lbl = document.getElementById('progress-label');
+    if (bar) bar.style.width = percent + '%';
+    if (pct) pct.textContent = Math.round(percent) + '%';
+    if (lbl) lbl.textContent = message;
+}
+
+function appendStatusMessage(container, text) {
+    const div = document.createElement('div');
+    div.style.cssText = 'margin:4px 0;color:#333';
+    div.textContent = text;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+/**
+ * Full lifecycle: start → poll → fetch result → display.
+ * Every HTTP call returns immediately, nothing blocks the UI.
+ */
+async function launchAnalysisWithProgress(sessionId, analysisType) {
+    // 1. Tell the server to start (returns immediately)
+    const startResp = await fetch(`/api/analysis/start/${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysis_type: analysisType })
+    });
+
+    if (!startResp.ok) {
+        const err = await startResp.json();
+        throw new Error(err.error || 'Impossible de lancer l\'analyse');
+    }
+
+    const startData = await startResp.json();
+
+    // If cached, result is ready right away
+    if (startData.cached) {
+        setProgress(100, 'Chargé depuis le cache');
+    }
+
+    // 2. Poll progress until complete
+    await new Promise((resolve, reject) => {
+        const interval = setInterval(async () => {
+            try {
+                const resp = await fetch(`/api/analysis/progress/${sessionId}`);
+                if (!resp.ok) return;
+                const p = await resp.json();
+
+                setProgress(p.percent, p.message);
+
+                if (p.complete) {
+                    clearInterval(interval);
+                    if (p.error) {
+                        reject(new Error(p.message));
+                    } else {
+                        resolve();
+                    }
+                }
+            } catch (err) {
+                console.error('Poll error:', err);
+            }
+        }, 400);
+    });
+
+    // 3. Fetch the actual result
+    const resultResp = await fetch(`/api/analysis/result/${sessionId}`);
+    if (!resultResp.ok) {
+        throw new Error('Impossible de récupérer les résultats');
+    }
+    const result = await resultResp.json();
+    analysisData[analysisType] = result;
+
+    // 4. Hide progress, display results
+    setTimeout(hideAnalysisProgress, 1500);
+    displayAnalysisResults(analysisType, result, sessionId);
 }
 
 async function handleAddFile() {
@@ -572,39 +903,22 @@ function showSuccessMessage(message) {
 }
 
 async function loadTabData(tabId) {
-    // Plus d'onglets, direct Exchange
     await loadAnalysisData('exchange');
 }
 
 async function loadAnalysisData(analysisType) {
     if (!currentSessionId) return;
-
     try {
-        const response = await fetch(`/api/analysis/${currentSessionId}/${analysisType}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(currentFilters)
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Erreur lors de l\'analyse');
-        }
-
-        const data = await response.json();
-        analysisData[analysisType] = data;
-        console.log(`Analysis data for ${analysisType}:`, data);
-        displayAnalysisResults(analysisType, data);
-
+        showAnalysisProgress('Relance de l\'analyse...');
+        await launchAnalysisWithProgress(currentSessionId, analysisType);
     } catch (error) {
         console.error('Analysis error:', error);
         showError(`Erreur lors de l'analyse: ${error.message}`);
+        hideAnalysisProgress();
     }
 }
 
-function displayAnalysisResults(analysisType, data) {
+function displayAnalysisResults(analysisType, data, sessionId) {
     switch (analysisType) {
         case 'summary':
             displaySummary(data);
@@ -616,7 +930,7 @@ function displayAnalysisResults(analysisType, data) {
             displayUserActivity(data);
             break;
         case 'exchange':
-            displayExchange(data);
+            displayExchange(data, sessionId);
             break;
     }
 }
@@ -934,6 +1248,14 @@ function renderInfosTab(auditData) {
                     <span class="json-key">IP Client:</span>
                     <span class="json-value">${auditData.ClientIP || auditData.ClientIPAddress || '-'}</span>
                 </div>
+                ${auditData._geo_country ? `
+                <div class="json-item">
+                    <span class="json-key">Géolocalisation:</span>
+                    <span class="json-value badge bg-info text-white">
+                        ${auditData._geo_country}${auditData._geo_country_code ? ' (' + auditData._geo_country_code + ')' : ''}
+                    </span>
+                </div>
+                ` : ''}
                 <div class="json-item">
                     <span class="json-key">Info Client:</span>
                     <span class="json-value">${auditData.ClientInfoString || '-'}</span>
@@ -1695,7 +2017,10 @@ function initializeTimelinePagination(operations) {
     const pageInfo = document.getElementById('timeline-page-info');
     const TIMELINE_ITEMS_PER_PAGE = getItemsPerPage();
     
-    const totalPages = Math.ceil(operations.length / TIMELINE_ITEMS_PER_PAGE);
+    // Combine pinned logs with regular operations (pinned first)
+    const combinedOps = [...pinnedLogs, ...operations];
+    
+    const totalPages = Math.ceil(combinedOps.length / TIMELINE_ITEMS_PER_PAGE);
     
     if (totalPages <= 1) {
         paginationNav.style.display = 'none';
@@ -1707,7 +2032,7 @@ function initializeTimelinePagination(operations) {
     window.timelineCurrentPage = 1;
     window.timelinePageInfo = pageInfo;
     window.timelineTotalPages = totalPages;
-    window.timelineCurrentOperations = operations;  // Store the operations being paginated
+    window.timelineCurrentOperations = combinedOps;  // Store combined operations with pinned first
     
     // Render first page
     updateTimelinePage(1);
@@ -1728,32 +2053,74 @@ function updateTimelinePage(pageNumber) {
         const row = document.createElement('tr');
         row.style.cursor = 'pointer';
         
+        // Check if pinned and apply style
+        const isPinned = isLogPinned(op);
+        if (isPinned) {
+            row.style.backgroundColor = '#fff3cd';
+            row.style.borderLeft = '4px solid #ffc107';
+        }
+        
         let htmlContent = '';
         visibleCols.forEach(col => {
             const value = getColumnValue(op, col.key);
             htmlContent += `<td>${value}</td>`;
         });
+        
+        // Add pin button
+        const pinButtonColor = isPinned ? '#ffc107' : '#ccc';
+        const pinButtonClass = isPinned ? 'pin-button-pinned' : '';
+        const pinButton = `
+            <td style="text-align: center;">
+                <button class="btn btn-sm btn-link p-0 ${pinButtonClass}" 
+                        title="${isPinned ? 'Dépincer' : 'Pincer cet événement'}">
+                    <i class="fas fa-thumbtack" style="color: ${pinButtonColor};"></i>
+                </button>
+            </td>
+        `;
+        htmlContent += pinButton;
+        
         row.innerHTML = htmlContent;
         
-        // Add click event to show details modal
-        row.addEventListener('click', () => {
-            showLogDetails({
-                timestamp: op.timestamp || '',
-                operation: op.operation || '',
-                subject: op.subject || '',
-                folder: op.folder || '',
-                size: op.size || 0,
-                user: op.user || '',
-                full_data: op.full_data || null  // Passer les données complètes
+        // Add click event to pin button
+        const pinBtn = row.querySelector('.btn-link');
+        if (pinBtn) {
+            pinBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                togglePinLog(op);
+            });
+        }
+        
+        // Add click event to show details modal (only for data cells, not button)
+        const dataCells = row.querySelectorAll('td:not(:last-child)');
+        dataCells.forEach(cell => {
+            cell.style.cursor = 'pointer';
+            cell.addEventListener('click', () => {
+                showLogDetails({
+                    timestamp: op.timestamp || '',
+                    operation: op.operation || '',
+                    subject: op.subject || '',
+                    folder: op.folder || '',
+                    size: op.size || 0,
+                    user: op.user || '',
+                    full_data: op.full_data || null  // Passer les données complètes
+                });
             });
         });
         
         // Hover effect
         row.addEventListener('mouseenter', () => {
-            row.style.backgroundColor = '#f0f0f0';
+            if (!isPinned) {
+                row.style.backgroundColor = '#f0f0f0';
+            } else {
+                row.style.backgroundColor = '#ffe69c';
+            }
         });
         row.addEventListener('mouseleave', () => {
-            row.style.backgroundColor = '';
+            if (!isPinned) {
+                row.style.backgroundColor = '';
+            } else {
+                row.style.backgroundColor = '#fff3cd';
+            }
         });
         
         timelineTable.appendChild(row);
@@ -1844,7 +2211,7 @@ function changeTimelinePage(event, direction) {
     }
 }
 
-function displayExchange(data) {
+function displayExchange(data, sessionId) {
     // Update badges only (removed KPI section)
     document.getElementById('badge-timeline').textContent = data.total_operations?.toLocaleString() || '0';
 
@@ -1858,6 +2225,11 @@ function displayExchange(data) {
             const dateA = new Date(a.timestamp || 0);
             const dateB = new Date(b.timestamp || 0);
             return dateB - dateA;
+        });
+        
+        // Add session_id to each operation
+        sorted.forEach(op => {
+            op.session_id = sessionId;
         });
         
         // Store sorted operations globally for pagination
@@ -1924,6 +2296,9 @@ function analyzePatterns(operations) {
     renderPatternTable('pattern-user-op', patterns.userOp, 2);
     renderPatternTable('pattern-op-ip', patterns.opIp, 2);
     renderComplexPatternTable('pattern-user-op-ip', patterns.userOpIp);
+    
+    // Render countries statistics
+    renderCountriesPatterns(operations);
 
     // Update badge with total unique patterns
     const totalPatterns = Object.keys(patterns.userOpIp).length;
@@ -2203,3 +2578,375 @@ function makeRowsClickable(tableSelector, clickHandler) {
         });
     });
 }
+
+// ============== PIN FUNCTIONALITY ==============
+
+// Check if a log is pinned
+function isLogPinned(op) {
+    const timestamp = String(op.timestamp || '').trim();
+    const user = String(op.user || '').trim().toLowerCase();
+    const operation = String(op.operation || '').trim().toLowerCase();
+    const subject = String(op.subject || '').trim().toLowerCase();
+    
+    return pinnedLogs.some(pinnedOp => 
+        String(pinnedOp.timestamp || '').trim() === timestamp &&
+        String(pinnedOp.user || '').trim().toLowerCase() === user &&
+        String(pinnedOp.operation || '').trim().toLowerCase() === operation &&
+        String(pinnedOp.subject || '').trim().toLowerCase() === subject
+    );
+}
+
+// Add or remove a log from pinned
+function togglePinLog(op) {
+    const timestamp = String(op.timestamp || '').trim();
+    const user = String(op.user || '').trim().toLowerCase();
+    const operation = String(op.operation || '').trim().toLowerCase();
+    const subject = String(op.subject || '').trim().toLowerCase();
+    
+    const index = pinnedLogs.findIndex(pinnedOp => 
+        String(pinnedOp.timestamp || '').trim() === timestamp &&
+        String(pinnedOp.user || '').trim().toLowerCase() === user &&
+        String(pinnedOp.operation || '').trim().toLowerCase() === operation &&
+        String(pinnedOp.subject || '').trim().toLowerCase() === subject
+    );
+    
+    if (index > -1) {
+        pinnedLogs.splice(index, 1);
+    } else {
+        pinnedLogs.push(JSON.parse(JSON.stringify(op))); // Deep clone
+    }
+    
+    updatePinnedCount();
+    
+    // Refresh the current page to show updated pin buttons
+    if (window.timelineCurrentPage) {
+        updateTimelinePage(window.timelineCurrentPage);
+    }
+}
+
+// Update the pinned logs count badge
+function updatePinnedCount() {
+    const badge = document.getElementById('pinned-count');
+    if (badge) {
+        // Count total pinned logs (already unique by timestamp+user+operation+subject)
+        badge.textContent = pinnedLogs.length;
+    }
+}
+
+// Show pinned logs modal
+function showPinnedLogs() {
+    const container = document.getElementById('pinned-logs-container');
+    
+    if (pinnedLogs.length === 0) {
+        container.innerHTML = '<p class="text-muted text-center py-4">Aucun événement pinné</p>';
+    } else {
+        let html = '<div style="max-height: 500px; overflow-y: auto;">';
+        pinnedLogs.forEach((op, idx) => {
+            html += `
+                <div class="card mb-2">
+                    <div class="card-body p-3">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div style="flex: 1;">
+                                <small class="text-muted">${op.timestamp ? new Date(op.timestamp).toLocaleString('fr-FR') : '-'}</small>
+                                <div class="mt-1">
+                                    <span class="badge bg-info">${op.operation || '-'}</span>
+                                    <span class="badge bg-secondary">${op.user || '-'}</span>
+                                </div>
+                                <small class="d-block mt-2 text-truncate">${op.subject || op.folder || '-'}</small>
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger ms-2" onclick="removePinnedLog(${idx})" title="Dépincer">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    }
+    
+    const modal = new bootstrap.Modal(document.getElementById('pinnedLogsModal'));
+    modal.show();
+}
+
+// Remove a pinned log by index
+function removePinnedLog(index) {
+    pinnedLogs.splice(index, 1);
+    updatePinnedCount();
+    showPinnedLogs(); // Refresh the modal
+}
+
+// Clear all pinned logs
+function clearAllPinned() {
+    if (confirm('Êtes-vous sûr de vouloir effacer tous les événements pinnés ?')) {
+        pinnedLogs = [];
+        updatePinnedCount();
+        showPinnedLogs(); // Refresh the modal
+    }
+}
+
+// ============== EXPORT FUNCTIONALITY ==============
+
+// Export filtered view as CSV
+function toggleCompactView() {
+    const checkbox = document.getElementById('compact-view');
+    compactViewEnabled = checkbox.checked;
+    
+    const timelineTable = document.getElementById('exchange-timeline');
+    if (compactViewEnabled) {
+        timelineTable.classList.add('compact-mode');
+    } else {
+        timelineTable.classList.remove('compact-mode');
+    }
+    
+    // Re-render current page to apply styling
+    if (window.timelineCurrentPage) {
+        updateTimelinePage(window.timelineCurrentPage);
+    }
+}
+
+function exportFilteredAsCSV() {
+    const operations = window.timelineAllOperations || [];
+    
+    if (operations.length === 0) {
+        showError('Aucune donnée à exporter');
+        return;
+    }
+    
+    // Define CSV columns (use available columns)
+    const csvColumns = ['timestamp', 'operation', 'user', 'subject', 'folder', 'Workload'];
+    
+    // Create CSV header
+    let csvContent = csvColumns.join(',') + '\n';
+    
+    // Add data rows
+    operations.forEach(op => {
+        const row = csvColumns.map(col => {
+            let value = op[col] || '';
+            // Escape quotes and wrap in quotes if contains comma
+            value = String(value).replace(/"/g, '""');
+            if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+                value = `"${value}"`;
+            }
+            return value;
+        }).join(',');
+        csvContent += row + '\n';
+    });
+    
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    downloadFile(blob, `export_filtered_${new Date().toISOString().split('T')[0]}.csv`);
+    
+    showSuccessMessage(`Fichier CSV exécuté (${operations.length} lignes)`);
+}
+
+// Export full data as JSON
+function exportFullAsJSON() {
+    const operations = window.timelineAllOperations || [];
+    
+    if (operations.length === 0) {
+        showError('Aucune donnée à exporter');
+        return;
+    }
+    
+    // Export with full data including the full_data field
+    const exportData = {
+        exportDate: new Date().toISOString(),
+        totalRecords: operations.length,
+        filters: window.timelineCurrentFilters || {},
+        data: operations
+    };
+    
+    const jsonContent = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8;' });
+    downloadFile(blob, `export_complete_${new Date().toISOString().split('T')[0]}.json`);
+    
+    showSuccessMessage(`Fichier JSON exécuté (${operations.length} enregistrements)`);
+}
+
+// Render countries patterns in the statistics tab
+function renderCountriesPatterns(operations) {
+    if (!operations || operations.length === 0) {
+        const table = document.getElementById('pattern-countries');
+        if (table) {
+            const tbody = table.querySelector('tbody');
+            if (tbody) tbody.innerHTML = '';
+        }
+        return;
+    }
+    
+    // Aggregate countries from operations
+    const countriesMap = {};
+    operations.forEach(op => {
+        if (op.geo_country_code && op.geo_country) {
+            const key = `${op.geo_country_code}|${op.geo_country}|${op.geo_continent || '-'}`;
+            if (!countriesMap[key]) {
+                countriesMap[key] = 0;
+            }
+            countriesMap[key]++;
+        }
+    });
+    
+    // Convert to array and sort by count (descending)
+    const countries = Object.keys(countriesMap)
+        .map(key => {
+            const parts = key.split('|');
+            return {
+                code: parts[0],
+                name: parts[1],
+                continent: parts[2],
+                count: countriesMap[key]
+            };
+        })
+        .sort((a, b) => b.count - a.count);
+    
+    // Render table
+    const table = document.getElementById('pattern-countries');
+    if (!table) return;
+    
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    
+    tbody.innerHTML = '';
+    
+    if (countries.length === 0) {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td colspan="4" class="text-center text-muted"><small>Aucun pays détecté</small></td>';
+        tbody.appendChild(row);
+        return;
+    }
+    
+    countries.forEach(item => {
+        const row = document.createElement('tr');
+        let badgeClass = 'info';
+        if (item.count > 50) badgeClass = 'danger';
+        else if (item.count > 20) badgeClass = 'warning';
+        
+        row.innerHTML = `
+            <td><small>${item.name}</small></td>
+            <td><small>${item.code}</small></td>
+            <td><small>${item.continent}</small></td>
+            <td class="text-end"><span class="badge bg-${badgeClass}">${item.count}</span></td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+// Helper function to download a file
+function downloadFile(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function showError(message) {
+    const alertDiv = document.createElement('div');
+    alertDiv.className = 'alert alert-danger alert-dismissible fade show position-fixed top-0 end-0 m-3';
+    alertDiv.style.zIndex = '9999';
+    alertDiv.innerHTML = `
+        <i class="fas fa-exclamation-circle me-2"></i>${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    document.body.appendChild(alertDiv);
+    
+    setTimeout(() => {
+        alertDiv.remove();
+    }, 4000);
+}
+
+// GeoIP Database Functions
+async function checkGeoIPStatus() {
+    try {
+        const response = await fetch('/api/geoip/status', { method: 'GET' });
+        const status = await response.json();
+        
+        const statusCard = document.getElementById('geoip-status-card');
+        const statusText = document.getElementById('geoip-status-text');
+        const downloadBtn = document.getElementById('download-geoip-btn');
+        
+        // Check GeoIP database status
+        const geoipLoaded = status.geoip?.loaded && status.geoip?.ranges_count > 0;
+        const asnLoaded = status.asn?.loaded && status.asn?.ranges_count > 0;
+        
+        if (geoipLoaded && asnLoaded) {
+            statusCard.className = 'alert alert-success mb-4';
+            statusText.innerHTML = `
+                <i class="fas fa-check-circle text-success"></i> <strong>Bases de données prêtes</strong><br>
+                <small>GeoIP: ${status.geoip.ranges_count.toLocaleString()} plages | ASN: ${status.asn.ranges_count.toLocaleString()} plages</small>
+            `;
+            downloadBtn.disabled = true;
+            downloadBtn.innerHTML = '<i class="fas fa-check"></i> Bases chargées';
+            downloadBtn.className = 'btn btn-sm btn-success';
+        } else if (geoipLoaded) {
+            statusCard.className = 'alert alert-info mb-4';
+            statusText.innerHTML = `
+                <i class="fas fa-info-circle text-info"></i> <strong>GeoIP prête</strong><br>
+                <small>GeoIP: ${status.geoip.ranges_count.toLocaleString()} plages | ASN: ${asnLoaded ? status.asn.ranges_count.toLocaleString() : 'Chargement...'} plages</small>
+            `;
+        } else {
+            statusCard.className = 'alert alert-warning mb-4';
+            statusText.innerHTML = '<i class="fas fa-exclamation-triangle"></i> <strong>Bases de données non chargées</strong><br><small>Cliquez sur "Télécharger" pour initialiser</small>';
+            downloadBtn.className = 'btn btn-sm btn-warning';
+        }
+    } catch (error) {
+        console.error('Error checking GeoIP status:', error);
+        const statusText = document.getElementById('geoip-status-text');
+        statusText.innerHTML = '<i class="fas fa-times-circle text-danger"></i> <strong>Erreur</strong><br><small>Impossible de vérifier les bases</small>';
+    }
+}
+
+async function downloadGeoIPDatabase() {
+    const downloadBtn = document.getElementById('download-geoip-btn');
+    const progressDiv = document.getElementById('geoip-progress');
+    const progressBar = document.getElementById('geoip-progress-bar');
+    
+    downloadBtn.disabled = true;
+    downloadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Téléchargement...';
+    progressDiv.style.display = 'block';
+    
+    try {
+        const response = await fetch('/api/geoip/download', {
+            method: 'POST'
+        });
+        
+        // Simulate progress
+        for (let i = 0; i < 100; i += 10) {
+            progressBar.style.width = i + '%';
+            await new Promise(r => setTimeout(r, 50));
+        }
+        
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            progressBar.style.width = '100%';
+            await new Promise(r => setTimeout(r, 500));
+            
+            downloadBtn.innerHTML = '✓ Base téléchargée';
+            downloadBtn.className = 'btn btn-sm btn-success';
+            showSuccessMessage(`Base GeoIP téléchargée: ${result.loaded_ranges.toLocaleString()} plages`);
+            
+            // Update status
+            await new Promise(r => setTimeout(r, 1000));
+            await checkGeoIPStatus();
+        } else {
+            showError(`Erreur: ${result.message}`);
+            downloadBtn.disabled = false;
+            downloadBtn.innerHTML = '<i class="fas fa-download"></i> Télécharger';
+        }
+    } catch (error) {
+        console.error('Download error:', error);
+        showError('Erreur lors du téléchargement de la base');
+        downloadBtn.disabled = false;
+        downloadBtn.innerHTML = '<i class="fas fa-download"></i> Télécharger';
+    } finally {
+        progressDiv.style.display = 'none';
+        progressBar.style.width = '0%';
+    }
+}
+

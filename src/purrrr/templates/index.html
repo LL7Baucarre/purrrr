@@ -11,6 +11,41 @@
     <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
 </head>
 <body>
+    <!-- Loading Modal for Database Initialization -->
+    <div id="db-loading-modal" class="modal fade" tabindex="-1" role="dialog" aria-labelledby="dbLoadingLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-dialog-centered" role="document">
+            <div class="modal-content border-0 shadow">
+                <div class="modal-body p-5 text-center">
+                    <h4 class="mb-4" id="dbLoadingLabel">
+                        <i class="fas fa-spinner fa-spin text-primary"></i> Initialisation
+                    </h4>
+                    <p class="text-muted mb-4">Chargement des bases de données...</p>
+                    
+                    <!-- Progress bars -->
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between mb-2">
+                            <small>Base GeoIP</small>
+                            <small id="geoip-loading-text">En cours...</small>
+                        </div>
+                        <div class="progress" style="height: 25px;">
+                            <div id="geoip-loading-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between mb-2">
+                            <small>Base ASN</small>
+                            <small id="asn-loading-text">En attente...</small>
+                        </div>
+                        <div class="progress" style="height: 25px;">
+                            <div id="asn-loading-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Navigation -->
     <nav class="navbar navbar-dark bg-dark sticky-top shadow">
         <div class="container-fluid">
@@ -39,6 +74,29 @@
                             <h4 class="mb-0"><i class="fas fa-upload"></i> Charger l'audit</h4>
                         </div>
                         <div class="card-body p-5">
+                            <!-- GeoIP Database Status -->
+                            <div id="geoip-status-card" class="alert alert-info mb-4" role="alert">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <h5 class="mb-1">
+                                            <i class="fas fa-globe"></i> Bases de données IP (GeoIP & ASN)
+                                        </h5>
+                                        <small id="geoip-status-text">
+                            <i class="fas fa-spinner fa-spin"></i> Chargement de la base...
+                        </small>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-info" id="download-geoip-btn">
+                                        <i class="fas fa-download"></i> Télécharger
+                                    </button>
+                                </div>
+                                <div id="geoip-progress" style="display:none; margin-top: 10px;">
+                                    <div class="progress">
+                                        <div id="geoip-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                                             role="progressbar" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+
                             <form id="upload-form" enctype="multipart/form-data">
                                 <!-- CSV File Upload -->
                                 <div class="mb-4">
@@ -93,6 +151,20 @@
 
         <!-- Dashboard Section -->
         <div id="dashboard-section" style="display:none;">
+            <!-- Progress Bar Container -->
+            <div id="dashboard-progress-container" style="display:none; margin-bottom: 20px;">
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card border-0 shadow">
+                            <div class="card-body p-4">
+                                <div id="dashboard-status-messages" style="background: #f8f9fa; border-left: 4px solid #007bff; padding: 15px; margin-bottom: 15px; border-radius: 4px; font-size: 14px; max-height: 200px; overflow-y: auto;"></div>
+                                <div id="dashboard-progress-bar"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
             <!-- Filter Panel -->
             <div class="row mb-4">
                 <div class="col-12">
@@ -144,6 +216,28 @@
                                     <label class="form-label"><i class="fas fa-ban"></i> Exclure IPs</label>
                                     <input type="text" class="form-control" id="exclude-ips" placeholder="192.168.0.*, 127.0.0.1">
                                     <small class="form-text text-muted">Virgule pour séparer, * pour wildcard</small>
+                                </div>
+
+                                <!-- Country Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-globe"></i> Pays</label>
+                                    <select class="form-select" id="filter-country" multiple>
+                                        <option value="">Tous les pays</option>
+                                    </select>
+                                </div>
+
+                                <!-- ASN Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-network-wired"></i> ASN</label>
+                                    <select class="form-select" id="filter-asn" multiple>
+                                        <option value="">Tous les ASN</option>
+                                    </select>
+                                </div>
+
+                                <!-- Session ID Filter -->
+                                <div class="col-md-3">
+                                    <label class="form-label"><i class="fas fa-id-card"></i> Session ID</label>
+                                    <input type="text" class="form-control" id="filter-session-id" placeholder="ID de session">
                                 </div>
 
                                 <!-- Date Range Filter -->
@@ -217,6 +311,11 @@
                                             <i class="fas fa-cube me-1"></i>Combinaison complète
                                         </button>
                                     </li>
+                                    <li class="nav-item" role="presentation">
+                                        <button class="nav-link" id="countries-tab" data-bs-toggle="tab" data-bs-target="#countries-content" type="button">
+                                            <i class="fas fa-globe me-1"></i>Pays
+                                        </button>
+                                    </li>
                                 </ul>
 
                                 <div class="tab-content">
@@ -284,6 +383,23 @@
                                             </table>
                                         </div>
                                     </div>
+
+                                    <!-- Countries Tab -->
+                                    <div class="tab-pane fade" id="countries-content" role="tabpanel">
+                                        <div style="max-height: 400px; overflow-y: auto;">
+                                            <table class="table table-sm table-hover mb-0" id="pattern-countries">
+                                                <thead class="table-light sticky-top">
+                                                    <tr>
+                                                        <th>Pays</th>
+                                                        <th>Code</th>
+                                                        <th>Continent</th>
+                                                        <th class="text-end">Occurrences</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody></tbody>
+                                            </table>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -294,14 +410,33 @@
                 <div class="row mb-4">
                     <div class="col-12">
                         <div class="card">
-                            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-                                <h5 class="mb-0">
-                                    <i class="fas fa-history me-2"></i> <strong>Events</strong>
-                                    <span class="badge bg-light text-primary ms-auto" id="badge-timeline">0</span>
-                                </h5>
-                                <button class="btn btn-sm btn-light" id="columns-toggle-btn" type="button" data-bs-toggle="collapse" data-bs-target="#columns-selector">
-                                    <i class="fas fa-columns"></i> Colonnes
-                                </button>
+                            <div class="card-header bg-primary text-white">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <h5 class="mb-0">
+                                        <i class="fas fa-history me-2"></i> <strong>Events</strong>
+                                        <span class="badge bg-light text-primary ms-2" id="badge-timeline">0</span>
+                                    </h5>
+                                    <button class="btn btn-sm btn-light" id="columns-toggle-btn" type="button" data-bs-toggle="collapse" data-bs-target="#columns-selector">
+                                        <i class="fas fa-columns"></i> Colonnes
+                                    </button>
+                                </div>
+                                <div class="d-flex gap-2 flex-wrap">
+                                    <button class="btn btn-sm btn-warning" id="export-csv-filtered" type="button" title="Exporter la vue filtrée en CSV">
+                                        <i class="fas fa-download me-1"></i> CSV
+                                    </button>
+                                    <button class="btn btn-sm btn-info" id="export-json-full" type="button" title="Exporter les données complètes en JSON">
+                                        <i class="fas fa-download me-1"></i> JSON
+                                    </button>
+                                    <button class="btn btn-sm btn-secondary" id="show-pinned-btn" type="button">
+                                        <i class="fas fa-thumbtack me-1"></i> Pinnés <span class="badge bg-light text-dark ms-1" id="pinned-count">0</span>
+                                    </button>
+                                    <div class="form-check form-check-inline ms-3">
+                                        <input class="form-check-input" type="checkbox" id="compact-view" />
+                                        <label class="form-check-label" for="compact-view">
+                                            <i class="fas fa-compress me-1"></i> Vue compacte
+                                        </label>
+                                    </div>
+                                </div>
                             </div>
                             
                             <!-- Column Selector -->
@@ -390,9 +525,6 @@
                     <div class="d-grid gap-2 d-sm-flex justify-content-sm-end">
                         <button type="button" class="btn btn-primary" id="add-file-btn" data-bs-toggle="modal" data-bs-target="#addFileModal">
                             <i class="fas fa-plus"></i> Ajouter un fichier supplémentaire
-                        </button>
-                        <button type="button" class="btn btn-secondary" id="reset-btn">
-                            <i class="fas fa-redo"></i> Nouvelle analyse
                         </button>
                     </div>
                 </div>
@@ -544,8 +676,35 @@
             </div>
         </div>
     </div>
+
+    <!-- Modal for Pinned Logs -->
+    <div class="modal fade" id="pinnedLogsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-warning">
+                    <h5 class="modal-title">
+                        <i class="fas fa-thumbtack me-2"></i> Événements pinnés
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" style="max-height: 500px; overflow-y: auto;">
+                    <div id="pinned-logs-container">
+                        <p class="text-muted text-center">Aucun événement pinné</p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-danger btn-sm" id="clear-all-pinned">
+                        <i class="fas fa-trash me-1"></i> Effacer tous les pinnés
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script src="{{ url_for('static', filename='app.js') }}"></script>
